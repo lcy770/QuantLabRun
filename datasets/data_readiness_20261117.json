@@ -1,0 +1,66 @@
+{
+  "checked_at": "2026-11-17",
+  "status": "awaiting_missing_source_sessions",
+  "source": "D:\\Projects\\Python\\QuantLab-backtest\\backend\\data_cache\\master",
+  "stocks": 500,
+  "source_maximum_date": "2026-06-16",
+  "missing_whole_pool_sessions": [
+    "2026-02-27",
+    "2026-03-02",
+    "2026-03-03",
+    "2026-03-04",
+    "2026-03-05",
+    "2026-03-06",
+    "2026-03-09",
+    "2026-04-28"
+  ],
+  "split": {
+    "mode": "shared_training_comparison",
+    "training_information_start": "2024-01-02",
+    "training_label_cutoff": "2026-06-16",
+    "comparison_information_cutoff": "2026-06-16",
+    "latest_signal_date": "2026-05-19",
+    "training_tasks": 45,
+    "comparison_tasks": 45,
+    "horizon": 20,
+    "block_days": 20,
+    "rolling_stride": 10,
+    "comparison_uses_training_data": true,
+    "independent_test_available": false
+  },
+  "data_panel_created": false,
+  "training_started": false,
+  "public_source_probe": "Eastmoney HTTPS request closed without response",
+  "source_conventions_verified": false,
+  "previous_date_split": {
+    "training_information_start": "2024-01-02",
+    "training_label_cutoff": "2025-09-24",
+    "development_information_cutoff": "2026-03-31",
+    "test_information_cutoff": "2026-06-16",
+    "test_signal_start": "2026-04-01",
+    "test_signal_end": "2026-05-19",
+    "training_tasks": 27,
+    "horizon": 20,
+    "block_days": 20,
+    "rolling_stride": 10,
+    "development_labels_used_for_training": false
+  },
+  "previous_split_label_availability_upper_bound": {
+    "development": {
+      "signals": 20,
+      "signals_with_complete_market_date_labels": 0
+    },
+    "locked_test": {
+      "signals": 31,
+      "signals_with_complete_market_date_labels": 12
+    }
+  },
+  "instruction_audit": {
+    "comparison_suite_passed": 7,
+    "warnings": 1,
+    "device": "cpu",
+    "historical_data_prepare_verified": true,
+    "full_20260616_panel_created": false,
+    "current_report": "docs/双层PPO_当前方案与指令核验_20261117.md"
+  }
+}

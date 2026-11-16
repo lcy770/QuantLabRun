@@ -119,7 +119,7 @@ python -m single_factor.hierarchical run --config single_factor/hierarchical_con
 python -m single_factor.hierarchical status --output var/experiments/candidate_selection_run
 ```
 
-恢复同一运行时追加 `--resume`。任务分别配置 `fit`、`search`、`validation`、`feedback`，独立验收配置为 `future`。示例配置使用现有历史缓存。最新对比实验按截至2026年6月16日的主缓存划分，训练从2024年开始，现有源行情还缺8个交易日，数据状态及执行命令见 [实验运行指南](../experiments/dual_ppo/README.md)。公式、边界、阶段控制及输出约定见 [双层 PPO 代码实现说明](../docs/双层PPO代码实现说明_20261116.md)。
+恢复同一运行时追加 `--resume`。任务分别配置 `fit`、`search`、`validation`、`feedback`，独立验收配置为 `future`。示例配置使用现有历史缓存。最新对比实验使用截至2026年6月16日的同一批45个训练任务，训练与算法对比共用数据，最晚成熟信号为5月19日。现有源行情还缺8个交易日，数据状态及执行命令见 [实验运行指南](../experiments/dual_ppo/README.md)。公式、边界、阶段控制及输出约定见 [双层 PPO 代码实现说明](../docs/双层PPO代码实现说明_20261116.md)。
 
 The runner writes `accepted_factors.jsonl`, `rejected_candidates.jsonl`, `expression_index.json`, `run_state.json`, and PPO checkpoints. It stops at the target count or the maximum attempt count and can be resumed from the same output directory.
 

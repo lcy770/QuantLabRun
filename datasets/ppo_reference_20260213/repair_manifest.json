@@ -1,0 +1,16 @@
+{
+  "adjustment_factor.npy": "d76922a939c96810778c68dac02d2a7004e86e532c17a94f2213e85a563cc72b",
+  "amount.npy": "7c3c5c4db327b950200d572da2dd8651254f045aea4235a01aed26253211e7c4",
+  "close.npy": "e9890e7f24f0a4a7c0cff305ae0c817b5bc33d78a77bd88f21016aa1e4a51b14",
+  "codes.json": "0a679a9177721c4b9da6c21c611335cb7b3c6d6523ab292a85e28fcd64f9e094",
+  "data_audit.json": "9ed8e227c2ace0ddbe7c3e20c2c9b419339a89c9d1924095d62eddca09816378",
+  "dates.npy": "0454f42826afeea75a259feefae54bf449d1c5631d955c8a9623110acce0fadd",
+  "high.npy": "ebb2923bab2752227d10390b73c946d2f54794dfa2c3cd0e5263589bc15202fe",
+  "label_h20.npy": "ab37eabb4c47014e3e2ce12844a802fabff05a552e46f4f7fea306caf0b7918c",
+  "low.npy": "69d4ee3dafc548b2b4b760580068dd261f30f3da2bfdf2685b31afc07169f90f",
+  "manifest.json": "4839b4b362dea5b5fd47d2cc9a9fbeb8096f41a7c7eb994ea51b0db45ad36a9e",
+  "open.npy": "afffe86cd19c979ece30eb79cc5da8d1bcfe3dd65e9f8011b78c66bf52e26643",
+  "reference_daily_return.npy": "8f20661f9c0eb99bd01c8f7b3be1f05d78d9f36cea8ec565100599ea29359acc",
+  "TurnoverRate.npy": "024fa50f696831045d7cba612b4013f5f52612cba9df0b5d2672fdc6987c09cd",
+  "volume.npy": "951546f1d662e210edeb2111a521ee7f74e4a659693e1a7acc60bd63f89cebde"
+}

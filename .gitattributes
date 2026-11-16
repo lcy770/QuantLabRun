@@ -1,0 +1,3 @@
+# 数据指纹按原始字节核验，跨平台检出时保持数据文件的换行和字节。
+backend/data_cache/master/** -text
+datasets/** -text

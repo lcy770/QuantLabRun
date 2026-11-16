@@ -95,7 +95,9 @@ def prepare_protocol(cache, output, profile="short", device="auto", tasks=None):
         coverage = validate_cache(cache, tasks, config["lookback"], config["target_horizon"], config["grammar"]["fields"])
     else:
         tasks = copy.deepcopy(tasks)
-        dates = {"mode": "explicit_historical_or_test_protocol", "training_tasks": sum(t["role"] == "train" for t in tasks)}
+        dates = {"mode": "explicit_historical_or_test_protocol", "training_tasks": sum(t["role"] == "train" for t in tasks),
+                 "comparison_uses_training_data": not any(t["role"] == "development" for t in tasks),
+                 "independent_test_available": any(t["role"] == "test" for t in tasks)}
         coverage = {"cache": str(cache), "mode": "explicit_tasks"}
     config.update(tasks=tasks, device=device, width=settings["width"], rollout_workers=1)
     config["initial_library"] = str((TEMPLATES / config["initial_library"]).resolve())
@@ -126,6 +128,9 @@ def prepare_protocol(cache, output, profile="short", device="auto", tasks=None):
     if evaluation_starts and any(checked[task["name"]]["feedback"].ends.max() >= min(evaluation_starts)
                                  for task in tasks if task["role"] == "train"):
         raise ValueError("training feedback labels overlap development/test generation dates")
+    if dates.get("comparison_uses_training_data"):
+        dates.setdefault("comparison_information_cutoff", str(max(checked[task["name"]]["feedback"].ends.max()
+                             for task in tasks if task["role"] == "train"))[:10])
     protocol = {"schema_version": 1, "profile": profile, "settings": settings, "dates": dates,
                 "coverage": coverage, "config": resolved, "nodes": experiment_nodes(),
                 "training_seeds": [0, 1, 2], "quantity_penalty": False}
@@ -139,7 +144,8 @@ def summarize_study(output, definitions=None, split=None):
     output = Path(output)
     if split is None:
         manifest = output / "manifest.json"
-        split = json.loads(manifest.read_text(encoding="utf-8")).get("comparison_split", "development") if manifest.exists() else "development"
+        metadata = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+        split = metadata.get("comparison_split", "development")
     if split not in {"training", "development", "test"}:
         raise ValueError("summary split must be training, development or test")
     prefix = "test_" if split == "test" else ""

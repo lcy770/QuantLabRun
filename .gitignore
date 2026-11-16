@@ -25,8 +25,7 @@ htmlcov/
 /var/
 
 # 旧布局（兼容历史工作区）
-# 数据缓存不入库：master 由 prepare-master 从原始 CSV 重建，其余为运行产物
-backend/data_cache/master/
+# 用户授权主行情随本次研究代码迁移，其余运行期缓存继续按下列路径管理。
 backend/data_cache/stock_daily/
 backend/data_cache/sample_store/
 backend/data_cache/factor_runtime/
@@ -67,6 +66,9 @@ _qa_research_8_25_run2/
 # ===== 大文件 / 数据二进制（主缓存 parquet 已显式保留）=====
 *.npy
 *.npz
+
+# 随仓库提供的500股历史实验面板
+!/datasets/ppo_reference_20260213/*.npy
 
 # ===== Word 临时锁文件 =====
 ~$*

@@ -55,11 +55,31 @@ def protocol(tmp_path):
     return protocol_path
 
 
-def test_all_experiment_nodes_train_restore_freeze_and_evaluate(protocol, tmp_path):
+@pytest.mark.parametrize("comparison_scope", ["development", "training"])
+def test_all_experiment_nodes_train_restore_freeze_and_evaluate(protocol, tmp_path, comparison_scope):
+    if comparison_scope == "training":
+        definition = json.loads(protocol.read_text())
+        config = definition["config"]
+        config["tasks"] = [task for task in config["tasks"] if task["role"] == "train"]
+        config_path = protocol.with_name("config.json")
+        save_json(config_path, config)
+        definition["config"] = load_selection_config(config_path)
+        definition["dates"] = {"mode": "shared_training_comparison", "comparison_uses_training_data": True}
+        definition["fingerprint"] = digest({key: value for key, value in definition.items() if key != "fingerprint"})
+        save_json(protocol, definition)
     output = tmp_path / "results"
     result = run_study(protocol, output, [0])
-    assert result["development_reports"] > 0
+    assert result[f"{comparison_scope}_reports"] > 0
+    assert result["evaluation_scope"] == comparison_scope
+    assert result["evaluation_uses_training_data"] == (comparison_scope == "training")
     study = Study(protocol, output)
+    if comparison_scope == "training":
+        assert study.evaluation_tasks("training") == study.training_tasks
+        reports = list(output.glob("seed_*/nodes/*/training/*.json"))
+        assert reports
+        assert all(json.loads(path.read_text())["evaluation_uses_training_data"] for path in reports)
+        assert not list(output.glob("seed_*/nodes/*/development/*.json"))
+        assert summarize_study(output)["training_reports"] == len(reports)
     assert torch.get_num_threads() == study.config["torch_threads"]
     for name, definition in experiment_nodes().items():
         saved = study.saved_node(name, 0)
@@ -91,6 +111,12 @@ def test_all_experiment_nodes_train_restore_freeze_and_evaluate(protocol, tmp_pa
     assert checkpoint.read_bytes() == before
     selection = tmp_path / "selection.json"
     freeze_selection(protocol, output, ["p_new_dual", "p_old_dual"], [0], selection)
+    if comparison_scope == "training":
+        assert json.loads(selection.read_text())["selection_basis"] == "training"
+        with pytest.raises(ValueError, match="no test tasks"):
+            evaluate_frozen(protocol, output, selection)
+        assert not (output / "test_access.jsonl").exists()
+        return
     assert evaluate_frozen(protocol, output, selection)["status"] == "complete"
     reports = list(output.glob("seed_*/nodes/*/test/*.json"))
     assert len(reports) == 4
@@ -154,15 +180,21 @@ def test_next_open_accounting_fees_missing_prices_and_cash():
 
 def test_calendar_split_and_insufficient_cache(protocol, tmp_path):
     tasks, summary = design_tasks(tmp_path)
-    assert summary["training_tasks"] == 27
+    assert summary["mode"] == "shared_training_comparison"
+    assert summary["training_tasks"] == summary["comparison_tasks"] == len(tasks)
+    assert len(tasks) > 27
     assert summary["training_information_start"] == "2024-01-02"
-    assert summary["training_label_cutoff"] == "2025-09-24"
-    assert summary["development_information_cutoff"] == "2026-03-31"
-    assert summary["test_information_cutoff"] == "2026-06-16"
-    assert summary["test_signal_start"] == "2026-04-01"
-    assert summary["test_signal_end"] == "2026-05-19"
-    assert tasks[-2]["search"]["start"] == "2025-09-25"
-    assert tasks[-1]["validation"]["end"] == "2026-03-03"
+    assert summary["training_label_cutoff"] == "2026-06-16"
+    assert summary["comparison_information_cutoff"] == "2026-06-16"
+    assert summary["latest_signal_date"] == "2026-05-19"
+    assert summary["comparison_uses_training_data"] is True
+    assert summary["independent_test_available"] is False
+    assert all(task["role"] == "train" for task in tasks)
+    assert tasks[-1]["feedback"]["end"] == "2026-05-19"
+    heldout, heldout_summary = design_tasks(tmp_path, development_cutoff="2026-03-31")
+    assert heldout_summary["training_tasks"] == 27
+    assert heldout[-2]["search"]["start"] == "2025-09-25"
+    assert heldout[-1]["validation"]["end"] == "2026-03-03"
     _, previous = design_tasks(tmp_path, start="2025-01-02", development_cutoff="2026-08-31",
                                test_cutoff="2026-11-11")
     assert previous["training_tasks"] == 13
@@ -170,6 +202,27 @@ def test_calendar_split_and_insufficient_cache(protocol, tmp_path):
     cache = Path(json.loads(protocol.read_text())["config"]["tasks"][0]["fit"]["cache"])
     with pytest.raises(ValueError, match="coverage insufficient"):
         validate_cache(cache, tasks, 2, 20, ["close"])
+
+
+def test_prepare_cli_resolves_relative_task_caches(tmp_path, monkeypatch):
+    """迁移机器后，显式任务缓存仍相对于源配置解析。"""
+    import sys
+    from single_factor.hierarchical import comparison_cli
+
+    config = tmp_path / "configs" / "tasks.json"
+    save_json(config, {"tasks": [{"name": "train", "role": "train", "fit": {"cache": "../data"}}]})
+    captured = {}
+
+    def prepare(cache, output, profile, device, tasks):
+        """捕获命令行传入准备器的实际任务路径。"""
+        captured["tasks"] = tasks
+        return {"dates": {"comparison_uses_training_data": True}}
+
+    monkeypatch.setattr(comparison_cli, "prepare_protocol", prepare)
+    monkeypatch.setattr(sys, "argv", ["comparison_cli", "prepare", "--cache", str(tmp_path / "data"),
+                        "--output", str(tmp_path / "protocol"), "--tasks-config", str(config)])
+    comparison_cli.main()
+    assert captured["tasks"][0]["fit"]["cache"] == str((tmp_path / "data").resolve())
 
 
 def test_transfer_round_trip_and_unsafe_archive(protocol, tmp_path):

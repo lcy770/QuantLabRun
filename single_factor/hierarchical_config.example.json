@@ -62,7 +62,7 @@
     "strict_types": true
   },
   "initial_seeds": 16,
-  "initial_library": "D:/Projects/Python/QuantLab-backtest/var/experiments/budget_study_20261108/library_verified/library.jsonl",
+  "initial_library": "../experiments/dual_ppo/assets/library.jsonl",
   "corpus": {
     "count": 144,
     "noise_steps": 4,
@@ -145,22 +145,22 @@
       "name": "historical_train",
       "role": "train",
       "fit": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2022-06-10",
         "end": "2022-12-02"
       },
       "search": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2023-01-03",
         "end": "2023-02-06"
       },
       "validation": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2023-03-07",
         "end": "2023-04-03"
       },
       "feedback": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2023-05-08",
         "end": "2023-06-02"
       }
@@ -169,22 +169,22 @@
       "name": "historical_development",
       "role": "development",
       "fit": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2022-06-10",
         "end": "2022-12-02"
       },
       "search": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2024-01-02",
         "end": "2024-01-29"
       },
       "validation": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2024-03-07",
         "end": "2024-04-03"
       },
       "feedback": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2024-05-09",
         "end": "2024-06-04"
       }
@@ -193,22 +193,22 @@
       "name": "historical_test",
       "role": "test",
       "fit": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2022-06-10",
         "end": "2022-12-02"
       },
       "search": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2024-08-01",
         "end": "2024-08-28"
       },
       "validation": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2024-09-30",
         "end": "2024-10-25"
       },
       "future": {
-        "cache": "D:/Projects/Python/QuantLab-backtest/var/experiments/mechanism_study_20261109/data_missingness_reference",
+        "cache": "../datasets/ppo_reference_20260213",
         "start": "2024-11-26",
         "end": "2024-12-23"
       }

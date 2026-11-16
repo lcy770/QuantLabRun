@@ -65,7 +65,7 @@ def run_legacy(study, name, seed):
         path = root / "legacy_config.json"
         save_json(path, config)
         resolved = load_config(path)
-        output = root / "training"
+        output = root / ("legacy_training" if study.comparison_split == "training" else "training")
         started = perf_counter()
         campaign = Campaign(resolved, output, resume=(output / "training_state.pt").exists())
         campaign.run()

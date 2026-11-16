@@ -30,51 +30,48 @@ U(S)=\alpha\overline{\mathrm{IC}}(S)-\beta\sigma_{\mathrm{block}}(S)-\gamma H(S)
 
 p_new_classical 与 g_diffusion、p_new_dual 与 s_upper_ppo、a_full 与 s_upper_ppo、w_equal_ridge 与 s_upper_ppo 共享真实模型。依赖自动补齐，跨组调用可复用已完成节点。
 
-## 数据日期与标签成熟
+## 当前数据与训练对比口径
 
-本轮使用截至2026年6月16日的现有行情。使用 XSHG 官方交易日和未来 20 交易日标签。F/G/A/R 各 20 个信号交易日，相邻段等待前段全部标签成熟。训练从2024年1月2日开始，每 10 交易日滚动一次，共 27 个任务。2023年7月3日起的早期数据提供至少100个交易日的算子预热。
+本轮以2026年6月16日为信息截止日，训练与算法对比共用同一批历史滚动任务。默认任务从2024年1月2日开始，共45个任务。20交易日收益标签最晚支持2026年5月19日的信号，最后一批任务的标签在6月16日成熟。2023年7月3日起的数据为算子提供至少100个交易日的预热。
 
-**2026年11月17日实际准备状态为待补8个交易日。** 主缓存最大日期为2026年6月16日，选定500只股票的日期并集仍缺2026年2月27日、3月2日至6日、3月9日及4月28日。全库5,432只股票核对3月2日和4月28日同样无记录。`prepare-panel` 已实测报告缺日，当前尚未生成本轮面板。补入这些日期的真实行情后，按下方命令准备数据及训练。开发R段的20日标签会经过这批缺日，完整划分按真实标签成熟日核验。
+| 用途 | 当前安排 |
+| --- | --- |
+| 训练与算法对比 | 同一组45个滚动任务，全部方法使用相同日期、股票池、门槛和配对预算 |
+| 每个任务内部 | F定方向、G生成和初筛、A提供上层观察、R计算终点奖励，各20个信号交易日 |
+| 时间衔接 | 前一段20日标签成熟后进入下一段，每10个交易日滚动，末批额外对齐最新成熟日 |
+| 结果含义 | 训练期对比，报告标记evaluation_scope=training，evaluation_uses_training_data=true |
+| 后续独立检验 | 使用2026年6月16日之后新增的行情，届时配置新的验收任务 |
 
-按官方交易日逐个检查20日标签，开发R段20个信号日全部受到整日缺失影响，保留测试31个信号日中最多12个拥有完整的市场日期标签。个别股票停牌等还可能进一步减少有效样本。核验记录保存在 `var/experiments/data_readiness_20261117.json`。本轮已完成日期划分与6项实验驱动回归，真实数据面板及训练等待源行情补齐。
+最新任务的F为2025年10月20日至11月14日，G为2025年12月15日至2026年1月13日，A为2026年2月11日至3月18日，R为2026年4月17日至5月19日。任务内部的A是上层可见观察段，R是训练奖励段。
 
-按同一成熟等待规则，训练若从2025年开始仅有2个完整任务，因此本轮将训练起点前移一年。开发与保留测试使用最新的2026年数据。
+**2026年11月17日数据准备状态为待补8个交易日。** 选定500只股票的日期并集缺2026年2月27日、3月2日至6日、3月9日及4月28日。全库5,432只股票核对3月2日和4月28日同样无记录。主缓存最大日期为2026年6月16日，`prepare-panel`已实测报告缺日，目标面板尚未生成。补入这8日真实行情后，按下方命令准备数据。核验记录保存在`var/experiments/data_readiness_20261117.json`。
 
-| 用途 | F | G | A | R 或独立信号段 | 信息截止 |
-| --- | --- | --- | --- | --- | --- |
-| 训练 | 从 2024-01-02 开始滚动 | 同任务顺序安排 | 同任务顺序安排 | 同任务顺序安排 | 训练标签最晚截止上限 2025-09-24 |
-| 开发选模 | 2025-07-31～08-27 | 2025-09-25～10-30 | 2025-11-28～12-25 | R 为 2026-01-27～03-03 | R 标签在 2026-03-31 全部成熟 |
-| 保留测试 | 2025-09-25～10-30 | 2025-11-28～12-25 | 2026-01-27～03-03 | future 为 2026-04-01～05-19 | 2026-03-31 冻结，标签在 06-16 全部成熟 |
+主缓存位于`backend/data_cache/master`，目标面板为`var/experiments/data_through_20260616`。旧PPO面板截至2026年2月13日。本轮沿用现有股票池、复权及数据约定的`exploratory`状态。
 
-训练反馈标签严格早于开发 G 的开始。开发 F 可使用此前历史信息。独立验收先用 F/G/A 生成候选并选定成员，再打开 future 标签。
-
-当前主行情缓存位于 `backend/data_cache/master`，最大记录日期为 **2026-06-16**，整日缺失状态见上文。旧PPO面板截至2026-02-13，本轮目标面板为 `var/experiments/data_through_20260616`。`prepare` 会检查覆盖范围和官方交易日。最后20个交易日仅为先前信号提供成熟标签，最晚可评价信号为2026-05-19。
-
-本轮保留现有股票池、复权及数据约定的 `exploratory` 状态。保留测试约一个半月，完整结果按该时长解释。
-
-模板内的 500 只股票名单与 399 条历史公式库固定并随 Git 迁移。公式库筛选标签截至 2022-11-28。股票名单沿用现有研究股票池，其历史退市覆盖、成分股时点与复权口径验证状态由真实数据清单记录，默认 `data_mode=exploratory`。
+模板内500只股票名单和399条历史公式随Git迁移。公式库筛选标签截至2022年11月28日。股票池历史退市覆盖、成分股时点和复权口径的验证状态保存在真实数据清单中。
 
 ## 提交到 GitHub
 
-当前远端为 `https://github.com/FelixZhang423/QuantLab.git`，当前分支为 `codex/hierarchical-factor-search`。在当前电脑执行以下命令可将整个工作区源码及小型实验资产提交到此分支。
+当前origin为 `https://github.com/FelixZhang423/QuantLab.git`，本地分支为 `codex/hierarchical-factor-search`。本次目标仓库为lcy770/QuantLabRun，当前机器已配置newrepo远端。提交包含源码、文档、主行情和历史实验面板。
 
 ```powershell
 git status --short
 git add -A
 git diff --cached --stat
 git commit -m "Implement dual PPO design and complete comparison experiments"
-git push -u origin codex/hierarchical-factor-search
+git remote set-url newrepo https://github.com/lcy770/QuantLabRun.git
+git push -u newrepo HEAD:main
 ```
 
-`var/` 下的行情、模型、日志和结果由 `.gitignore` 忽略。市场数据用下述数据包迁移。
+主行情`backend/data_cache/master`和历史面板`datasets/ppo_reference_20260213`随Git提交。`var/`下新生成的面板、模型、日志和结果按运行产物管理。数据内容、SHA256清单及历史smoke命令见 [随仓库数据集](../../datasets/README.md)。
 
 ## 实验电脑环境
 
-在另一台电脑克隆并进入仓库。
+在另一台电脑克隆并进入仓库，主行情和历史面板会一并检出。
 
 ```powershell
-git clone --branch codex/hierarchical-factor-search https://github.com/FelixZhang423/QuantLab.git
-cd QuantLab
+git clone --branch main https://github.com/lcy770/QuantLabRun.git
+cd QuantLabRun
 conda create -n dualppo python=3.11 -y
 conda activate dualppo
 python -m pip install --upgrade pip
@@ -163,7 +160,7 @@ python -m single_factor.hierarchical.comparison_cli summarize --output var/exper
 
 ## 主要对比组长训练
 
-根据开发结果确定主要组后，在新的 long 协议执行所选节点。下面命令覆盖生成主对照、新双 PPO 与旧双 PPO，自动补齐共享预训练及依赖。
+根据训练期配对对比确定主要组后，在新的 long 协议执行所选节点。下面命令覆盖生成主对照、新双 PPO 与旧双 PPO，自动补齐共享预训练及依赖。
 
 ```powershell
 python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_through_20260616 --output var/experiments/protocol_20260616_long --profile long --device cuda
@@ -176,7 +173,9 @@ python -m single_factor.hierarchical.comparison_cli run --protocol var/experimen
 python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_long/protocol.json --output var/experiments/results_20260616_long --seeds 0 1 2 --groups generation selection pairing reward continuation weighting
 ```
 
-long 使用独立初始化与完整长预算，short 结果用于选择需要长训练的实验组。续训机制对比由 c_lower、c_upper、c_alternating 单独实现。
+long 使用独立初始化与完整长预算，short的训练期对比用于选择需要长训练的实验组。续训机制对比由 c_lower、c_upper、c_alternating 单独实现。
+
+45个任务的全部限时搜索也计入总成本。long中每个生成器、每个训练种子的限时搜索预算为45×3×1800秒，约67.5小时，另有固定尝试评价和模型训练。完整五组的全量长训加评价会超过1至2周，执行范围依据short结果和实际时间预算确定。
 
 ## 断点恢复和结果
 
@@ -187,19 +186,17 @@ python -m single_factor.hierarchical.comparison_cli status --output var/experime
 python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_20260616_long
 ```
 
-结果目录包含 `comparison.csv`、`weight_comparison.csv`、`seed_means.json`、`paired_differences.json`，以及 `seed_<种子>/nodes/<节点>/development/` 内的逐次报告。报告记录表达式、固定方向、成员、奖励分项、候选池身份、训练成本与逐日净值。`manifest.json` 保存环境版本，`source_snapshot/` 保存本次源码。
+结果目录包含 `comparison.csv`、`weight_comparison.csv`、`seed_means.json`、`paired_differences.json`，以及 `seed_<种子>/nodes/<节点>/training/` 内的逐次报告。汇总表和逐次报告都记录训练期评价用途。报告记录表达式、固定方向、成员、奖励分项、候选池身份、训练成本与逐日净值。`manifest.json` 保存环境版本，`source_snapshot/` 保存本次源码。
 
-## 冻结后独立验收
+## 冻结与后续独立检验
 
-下方给出新双 PPO、新下层加常规筛选、旧双 PPO 的冻结命令。将节点列表改为开发结果确定的最终方法后执行。freeze 固定节点、训练种子及检查点哈希，evaluate 校验冻结身份并记录测试数据访问。
+训练期对比完成后，可冻结需要后续跟踪的方法及检查点。
 
 ```powershell
 python -m single_factor.hierarchical.comparison_cli freeze --protocol var/experiments/protocol_20260616_long/protocol.json --output var/experiments/results_20260616_long --nodes p_new_dual p_new_classical p_old_dual --seeds 0 1 2 --selection var/experiments/results_20260616_long/frozen_selection.json
-python -m single_factor.hierarchical.comparison_cli evaluate --protocol var/experiments/protocol_20260616_long/protocol.json --output var/experiments/results_20260616_long --selection var/experiments/results_20260616_long/frozen_selection.json
-python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_20260616_long --split test
 ```
 
-验收报告位于各节点的 `test/`，汇总输出以 `test_` 开头。
+本轮默认协议全部为训练任务，冻结记录的selection_basis为training。后续独立检验需要6月16日之后的行情及对应future任务配置。当前协议直接调用evaluate会提示缺少test任务。历史显式F/G/A/R/future协议继续支持原来的冻结验收流程。
 
 ## Top50 与配权口径
 

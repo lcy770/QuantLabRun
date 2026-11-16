@@ -235,7 +235,16 @@ def main():
     elif args.command == "prepare-panel":
         result = prepare_panel(args.master, args.codes, args.output, start=args.start, end=args.end)
     elif args.command == "prepare":
-        tasks = json.loads(Path(args.tasks_config).read_text(encoding="utf-8-sig"))["tasks"] if args.tasks_config else None
+        tasks = None
+        if args.tasks_config:
+            task_config = Path(args.tasks_config).resolve()
+            tasks = json.loads(task_config.read_text(encoding="utf-8-sig"))["tasks"]
+            for task in tasks:
+                for segment in ("fit", "search", "validation", "feedback", "future"):
+                    if segment in task and "cache" in task[segment]:
+                        cache = Path(task[segment]["cache"])
+                        if not cache.is_absolute():
+                            task[segment]["cache"] = str((task_config.parent / cache).resolve())
         result = prepare_protocol(args.cache, args.output, args.profile, args.device, tasks)
         result = {"protocol": str(Path(args.output).resolve() / "protocol.json"), "dates": result["dates"]}
     elif args.command == "run":
