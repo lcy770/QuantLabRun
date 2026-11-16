@@ -5,3 +5,4 @@ torch
 gymnasium>=0.28
 stable-baselines3>=2.0
 sb3-contrib>=2.0
+exchange_calendars==4.13.2

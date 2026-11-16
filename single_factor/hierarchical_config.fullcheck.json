@@ -1,0 +1,162 @@
+{
+  "seed": 0,
+  "device": "cpu",
+  "data_mode": "exploratory",
+  "target_horizon": 20,
+  "lookback": 100,
+  "future_days": 20,
+  "width": 32,
+  "torch_threads": 2,
+  "signal_cache_size": 64,
+  "grammar": {
+    "fields": [
+      "open",
+      "close",
+      "high",
+      "low",
+      "volume",
+      "amount",
+      "TurnoverRate"
+    ],
+    "operators": [
+      "abs",
+      "sign",
+      "reverse",
+      "log",
+      "add",
+      "sub",
+      "mul",
+      "div",
+      "max",
+      "min",
+      "ts_mean",
+      "ts_std",
+      "ts_var",
+      "delay",
+      "delta",
+      "ts_corr",
+      "ts_covariance",
+      "ts_rank"
+    ],
+    "windows": [
+      1,
+      5,
+      10,
+      20,
+      40
+    ],
+    "constants": [
+      -1.0,
+      -0.5,
+      0.0,
+      0.5,
+      1.0,
+      2.0
+    ],
+    "max_nodes": 15,
+    "max_depth": 8,
+    "max_lookback": 100,
+    "strict_types": true
+  },
+  "corpus": {
+    "count": 64,
+    "noise_steps": 4,
+    "seed": 0
+  },
+  "pretrain": {
+    "epochs": 2,
+    "patience": 2,
+    "min_delta": 0.001,
+    "learning_rate": 0.001,
+    "batch_size": 8,
+    "holdout_samples": 8
+  },
+  "lower": {
+    "iterations": 2,
+    "batch_formulas": 4,
+    "learning_rate": 0.0003,
+    "continuation_samples": 4,
+    "continuation_states": 4,
+    "score_weights": [
+      0.5,
+      0.3,
+      0.2
+    ],
+    "ppo": {
+      "epochs": 4,
+      "batch_size": 16,
+      "clip": 0.2,
+      "entropy_weight": 0.01,
+      "value_weight": 0.5
+    }
+  },
+  "upper": {
+    "iterations": 1,
+    "joint_iterations": 1,
+    "episodes_per_batch": 1,
+    "learning_rate": 0.0003,
+    "ppo": {
+      "epochs": 4,
+      "batch_size": 16,
+      "clip": 0.2,
+      "entropy_weight": 0.01,
+      "value_weight": 0.5
+    }
+  },
+  "search": {
+    "initial_seeds": 8,
+    "shortlist_size": 32,
+    "pool_capacity": 3,
+    "quality_threshold": 0.02,
+    "min_coverage": 0.8,
+    "correlation_threshold": 0.98,
+    "pair_gain_threshold": 0.001,
+    "combination_weight": 50.0,
+    "ridge": 0.001,
+    "seconds": 8,
+    "max_attempts": 100000
+  },
+  "tasks": [
+    {
+      "name": "historical_train",
+      "role": "train",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2022-01-04",
+        "end": "2022-10-31"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2023-02-01",
+        "end": "2023-12-01"
+      }
+    },
+    {
+      "name": "development_2024",
+      "role": "development",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/meta"
+      }
+    }
+  ],
+  "evaluation": {
+    "seconds": 10,
+    "seeds": [
+      0
+    ],
+    "methods": [
+      "original_rpn",
+      "ast_random_init",
+      "random",
+      "quality",
+      "productivity",
+      "ucb",
+      "upper_ppo",
+      "alternating_ppo",
+      "lambda_zero"
+    ]
+  }
+}

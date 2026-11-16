@@ -1,0 +1,224 @@
+{
+  "seed": 0,
+  "device": "cpu",
+  "data_mode": "exploratory",
+  "target_horizon": 20,
+  "lookback": 100,
+  "future_days": 20,
+  "width": 32,
+  "torch_threads": 4,
+  "signal_cache_size": 64,
+  "grammar": {
+    "fields": [
+      "open",
+      "close",
+      "high",
+      "low",
+      "volume",
+      "amount",
+      "TurnoverRate"
+    ],
+    "operators": [
+      "abs",
+      "sign",
+      "reverse",
+      "log",
+      "add",
+      "sub",
+      "mul",
+      "div",
+      "max",
+      "min",
+      "ts_mean",
+      "ts_std",
+      "ts_var",
+      "delay",
+      "delta",
+      "ts_corr",
+      "ts_covariance",
+      "ts_rank"
+    ],
+    "windows": [
+      1,
+      5,
+      10,
+      20,
+      40
+    ],
+    "constants": [
+      -1.0,
+      -0.5,
+      0.0,
+      0.5,
+      1.0,
+      2.0
+    ],
+    "max_nodes": 15,
+    "max_depth": 8,
+    "max_lookback": 100,
+    "strict_types": true
+  },
+  "corpus": {
+    "count": 512,
+    "noise_steps": 4,
+    "seed": 0
+  },
+  "pretrain": {
+    "epochs": 10,
+    "patience": 4,
+    "min_delta": 0.001,
+    "learning_rate": 0.001,
+    "batch_size": 8,
+    "holdout_samples": 32
+  },
+  "lower": {
+    "iterations": 96,
+    "batch_formulas": 32,
+    "learning_rate": 0.0003,
+    "continuation_samples": 4,
+    "continuation_states": 8,
+    "score_weights": [
+      0.5,
+      0.3,
+      0.2
+    ],
+    "ppo": {
+      "epochs": 4,
+      "batch_size": 32,
+      "clip": 0.2,
+      "entropy_weight": 0.01,
+      "value_weight": 0.5
+    },
+    "diffusion_steps": 2
+  },
+  "upper": {
+    "iterations": 24,
+    "joint_iterations": 4,
+    "episodes_per_batch": 12,
+    "learning_rate": 0.0003,
+    "ppo": {
+      "epochs": 4,
+      "batch_size": 32,
+      "clip": 0.2,
+      "entropy_weight": 0.01,
+      "value_weight": 0.5
+    }
+  },
+  "search": {
+    "initial_seeds": 401,
+    "shortlist_size": 32,
+    "pool_capacity": 5,
+    "quality_threshold": 0.02,
+    "min_coverage": 0.8,
+    "correlation_threshold": 0.98,
+    "pair_gain_threshold": 0.001,
+    "combination_weight": 50.0,
+    "ridge": 0.001,
+    "seconds": 20,
+    "max_attempts": 100000,
+    "diffusion_steps": 2,
+    "min_train_ic": 0.01,
+    "min_positive_fold_fraction": 0.6666666666666666
+  },
+  "tasks": [
+    {
+      "name": "historical_train_0",
+      "role": "train",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2022-01-04",
+        "end": "2022-10-31"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2023-02-01",
+        "end": "2023-04-28"
+      }
+    },
+    {
+      "name": "historical_train_1",
+      "role": "train",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2022-01-04",
+        "end": "2022-10-31"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2023-05-05",
+        "end": "2023-08-31"
+      }
+    },
+    {
+      "name": "historical_train_2",
+      "role": "train",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2022-01-04",
+        "end": "2022-10-31"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train",
+        "start": "2023-09-01",
+        "end": "2023-12-01"
+      }
+    },
+    {
+      "name": "development_2024",
+      "role": "development",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/train"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/meta"
+      }
+    },
+    {
+      "name": "locked_test",
+      "role": "test",
+      "fit": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/meta"
+      },
+      "search": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/outer"
+      },
+      "future": {
+        "cache": "D:/Projects/Python/QuantLab/single_factor/out/p0_20261013/cache/test"
+      }
+    }
+  ],
+  "evaluation": {
+    "seconds": 60,
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "methods": [
+      "original_rpn",
+      "ast_random_init",
+      "random",
+      "quality",
+      "productivity",
+      "ucb",
+      "upper_ppo",
+      "alternating_ppo",
+      "lambda_zero"
+    ]
+  },
+  "rollout_workers": 12,
+  "record_lower_trajectories": true,
+  "initial_library": "D:\\Projects\\Python\\QuantLab-backtest\\var\\experiments\\llm_library_revalidated_20261107\\library.jsonl",
+  "initializer_checkpoint": "D:\\Projects\\Python\\QuantLab-backtest\\var\\experiments\\hierarchical_research_suite_20261106\\training_seed_0\\syntax_best.pt",
+  "corpus_source": "D:\\Projects\\Python\\QuantLab-backtest\\var\\experiments\\hierarchical_research_suite_20261106\\training_seed_0",
+  "signal_cache_dir": "D:\\Projects\\Python\\QuantLab-backtest\\var\\cache\\hierarchical_signals_corrected_20261107",
+  "shared_pretraining_seconds": 2285.9168736999854,
+  "upper_validation": {
+    "task": "development_2024",
+    "every": 4,
+    "seconds": 180,
+    "episodes": 3,
+    "max_attempts": 32
+  },
+  "shared_library_preparation_seconds": 1086.2577864999937
+}

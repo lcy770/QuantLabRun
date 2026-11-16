@@ -1,7 +1,7 @@
 """API 请求体 schema。路由模块只从这里导入，不再内联定义。"""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,6 +33,7 @@ class FactorGenerationSplit(BaseModel):
 
 class FactorGenerationRequest(BaseModel):
     pool_id: str
+    algorithm: Optional[Literal["rpn_ppo", "hierarchical_ppo"]] = None
     run_name: Optional[str] = None
     fields: Optional[List[str]] = None
     operators: Optional[List[str]] = None

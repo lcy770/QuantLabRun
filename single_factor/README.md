@@ -1,5 +1,7 @@
 # Single Factor Generator
 
+双层 PPO 的五组对比实验、跨机迁移和训练命令见 [实验运行指南](../experiments/dual_ppo/README.md)。
+
 This package is independent from the original combination-oriented AlphaGen scripts. It preprocesses the large custom daily CSV once, creates a configurable stock pool, and evaluates each generated expression as a single factor.
 
 > Note: `evaluator.py` and the vendored AlphaGen config currently import `custom_bt` / `adapters` from `backend/`. Running this package outside the repository requires adding `backend/` to `PYTHONPATH`; moving those two helpers into `single_factor` is the follow-up if full standalone deployment is needed.
@@ -107,6 +109,17 @@ python -m single_factor.cli materialize-splits --config single_factor/runtime.js
 ```
 
 `cache_start` must include at least 100 trading days before the formal training start so rolling expressions such as `Mean(close,20)` can be evaluated at the boundary. `cache_end` must include the target horizon after the final evaluation date.
+
+## 双层 PPO 候选生成与等权集合选择
+
+`hierarchical_config.example.json` 使用 `candidate_selection` 架构。下层统一训练起点选择与原生 RPN 扩散编辑，上层选择成员或 STOP。基础下层奖励为 Q−κC，上层奖励为 αIC−βσ块−γH，H 默认使用反馈期 R。设置 `reward.eta` 大于零可在交替训练中回传已选成员的移除贡献 D。
+
+```powershell
+python -m single_factor.hierarchical run --config single_factor/hierarchical_config.example.json --output var/experiments/candidate_selection_run
+python -m single_factor.hierarchical status --output var/experiments/candidate_selection_run
+```
+
+恢复同一运行时追加 `--resume`。任务分别配置 `fit`、`search`、`validation`、`feedback`，独立验收配置为 `future`。示例配置使用现有历史缓存。最新对比实验按截至2026年6月16日的主缓存划分，训练从2024年开始，现有源行情还缺8个交易日，数据状态及执行命令见 [实验运行指南](../experiments/dual_ppo/README.md)。公式、边界、阶段控制及输出约定见 [双层 PPO 代码实现说明](../docs/双层PPO代码实现说明_20261116.md)。
 
 The runner writes `accepted_factors.jsonl`, `rejected_candidates.jsonl`, `expression_index.json`, `run_state.json`, and PPO checkpoints. It stops at the target count or the maximum attempt count and can be resumed from the same output directory.
 

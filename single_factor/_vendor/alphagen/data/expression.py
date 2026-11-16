@@ -208,7 +208,11 @@ class BinaryOperator(Operator):
         return cls._check_arity(*args).or_else(lambda: cls._check_exprs_featured([args[0], args[1]]))
 
     def evaluate(self, data: StockData, period: slice = slice(0, 1)) -> Tensor:
-        return self._apply(self._lhs.evaluate(data, period), self._rhs.evaluate(data, period))
+        lhs, rhs = self._lhs.evaluate(data, period), self._rhs.evaluate(data, period)
+        result = self._apply(lhs, rhs)
+        if not result.is_floating_point():
+            result = result.to(lhs.dtype)
+        return torch.where(torch.isfinite(lhs) & torch.isfinite(rhs), result, torch.full_like(result, torch.nan))
 
     @abstractmethod
     def _apply(self, lhs: Tensor, rhs: Tensor) -> Tensor: ...
@@ -351,7 +355,8 @@ class Abs(UnaryOperator):
 
 
 class Sign(UnaryOperator):
-    def _apply(self, operand: Tensor) -> Tensor: return operand.sign()
+    def _apply(self, operand: Tensor) -> Tensor:
+        return torch.where(torch.isfinite(operand), operand.sign(), torch.full_like(operand, torch.nan))
 
 
 class Inverse(UnaryOperator):
@@ -619,7 +624,9 @@ class Rank(RollingOperator):
         left = (last < operand).count_nonzero(dim=-1)
         right = (last <= operand).count_nonzero(dim=-1)
         result = (right + left + (right > left)) / (2 * n)
-        return result
+        # Match the strict rolling-window convention used by mean/std/cov:
+        # missing/undefined intermediates must never become finite rank signals.
+        return torch.where(torch.isfinite(operand).all(dim=-1), result, torch.full_like(result, torch.nan))
 
 
 class Delta(RollingOperator):
@@ -667,14 +674,19 @@ class Cov(PairRollingOperator):
 
 class Corr(PairRollingOperator):
     def _apply(self, lhs: Tensor, rhs: Tensor) -> Tensor:
+        # Correlation is invariant to positive scaling. Scaling prevents
+        # overflow for large volume/amount inputs without an absolute unit cutoff.
+        lhs = lhs / lhs.abs().amax(dim=-1, keepdim=True).clamp_min(torch.finfo(lhs.dtype).tiny)
+        rhs = rhs / rhs.abs().amax(dim=-1, keepdim=True).clamp_min(torch.finfo(rhs.dtype).tiny)
         clhs = lhs - lhs.mean(dim=-1, keepdim=True)
         crhs = rhs - rhs.mean(dim=-1, keepdim=True)
         ncov = (clhs * crhs).sum(dim=-1)
         nlvar = (clhs ** 2).sum(dim=-1)
         nrvar = (crhs ** 2).sum(dim=-1)
         stdmul = (nlvar * nrvar).sqrt()
-        stdmul[(nlvar < 1e-6) | (nrvar < 1e-6)] = 1
-        return ncov / stdmul
+        valid = (torch.isfinite(lhs).all(dim=-1) & torch.isfinite(rhs).all(dim=-1) &
+                 (lhs.amax(dim=-1) > lhs.amin(dim=-1)) & (rhs.amax(dim=-1) > rhs.amin(dim=-1)) & (stdmul > 0))
+        return torch.where(valid, (ncov / stdmul).clamp(-1, 1), torch.full_like(ncov, torch.nan))
 
 
 class TSArgMax(RollingOperator):

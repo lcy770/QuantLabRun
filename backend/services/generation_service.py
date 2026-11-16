@@ -473,6 +473,7 @@ def get_factor_generation_defaults(pool_id: Optional[str] = None) -> Dict[str, A
             "target_factor_count": int(config.get("target_factor_count", 50)),
             "max_attempts": int(config.get("max_attempts", 100000)),
             "rollout_timesteps": int(config.get("rollout_timesteps", 2048)),
+            "algorithm": str(config.get("algorithm", "rpn_ppo")),
             "seed": int(config.get("seed", 0)),
             "device": str(config.get("device", "auto")),
         }
@@ -632,6 +633,7 @@ def create_factor_generation(request: FactorGenerationRequest) -> Dict[str, Any]
     warnings.extend(normalized_split_warnings)
 
     generation_config: Dict[str, Any] = {
+        "algorithm": request.algorithm or str(defaults.get("algorithm", "rpn_ppo")),
         "target_factor_count": target_factor_count,
         "max_attempts": max_attempts,
         "rollout_timesteps": rollout_timesteps,
@@ -639,6 +641,8 @@ def create_factor_generation(request: FactorGenerationRequest) -> Dict[str, Any]
         "device": device,
         "quality": quality,
     }
+    if generation_config["algorithm"] == "hierarchical_ppo":
+        generation_config["hierarchical"] = dict(_factor_generation_defaults().get("hierarchical", {}))
     if run_name:
         generation_config["run_name"] = run_name
     payload = {

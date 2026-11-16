@@ -127,6 +127,12 @@ def command_materialize_splits(config: Dict[str, Any]) -> None:
 
 
 def command_run(config: Dict[str, Any]) -> None:
+    if config.get("algorithm") == "hierarchical_ppo":
+        from .hierarchical.__main__ import load_config, run
+        research_config = _path(config["hierarchical_config"], config)
+        print(json.dumps(run(load_config(research_config), _path(config["output_dir"], config),
+                             resume=bool(config.get("resume", False))), ensure_ascii=False, indent=2))
+        return
     cache_dir = _path(config["cache_dir"], config)
     manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
     horizon = int(config.get("target_horizon", 20))

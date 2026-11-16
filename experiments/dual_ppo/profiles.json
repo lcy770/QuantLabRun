@@ -1,0 +1,81 @@
+{
+  "smoke": {
+    "width": 8,
+    "noise_steps": 2,
+    "corpus_count": 24,
+    "pretrain_epochs": 1,
+    "lower_iterations": 1,
+    "upper_iterations": 1,
+    "continuation_iterations": 1,
+    "lower_seconds": 60,
+    "upper_seconds": 60,
+    "continuation_seconds": 60,
+    "batch_formulas": 2,
+    "pool_attempts": 4,
+    "episodes_per_batch": 1,
+    "max_members": 2,
+    "candidate_capacity": 8,
+    "ppo_epochs": 1,
+    "rpn_steps": 32,
+    "rpn_width": 16,
+    "attempt_budget": 4,
+    "time_budget": 1.0,
+    "evaluation_seeds": [
+      0
+    ]
+  },
+  "short": {
+    "width": 32,
+    "noise_steps": 4,
+    "corpus_count": 144,
+    "pretrain_epochs": 2,
+    "lower_iterations": 100000,
+    "upper_iterations": 100000,
+    "continuation_iterations": 100000,
+    "lower_seconds": 120,
+    "upper_seconds": 60,
+    "continuation_seconds": 120,
+    "batch_formulas": 16,
+    "pool_attempts": 128,
+    "episodes_per_batch": 4,
+    "max_members": 10,
+    "candidate_capacity": 128,
+    "ppo_epochs": 4,
+    "rpn_steps": 128,
+    "rpn_width": 128,
+    "attempt_budget": 1000,
+    "time_budget": 60.0,
+    "evaluation_seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "long": {
+    "width": 32,
+    "noise_steps": 4,
+    "corpus_count": 144,
+    "pretrain_epochs": 10,
+    "lower_iterations": 1000000,
+    "upper_iterations": 1000000,
+    "continuation_iterations": 1000000,
+    "lower_seconds": 57600,
+    "upper_seconds": 28800,
+    "continuation_seconds": 14400,
+    "batch_formulas": 16,
+    "pool_attempts": 128,
+    "episodes_per_batch": 4,
+    "max_members": 10,
+    "candidate_capacity": 128,
+    "ppo_epochs": 4,
+    "rpn_steps": 128,
+    "rpn_width": 128,
+    "attempt_budget": 10000,
+    "time_budget": 1800.0,
+    "evaluation_seeds": [
+      0,
+      1,
+      2
+    ]
+  }
+}

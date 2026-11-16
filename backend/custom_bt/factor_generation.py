@@ -402,6 +402,9 @@ def run_factor_generation(
     explicit_run_id = str(config.get("run_id") or "").strip()
     run_id = explicit_run_id or new_factor_run_id(pool_id, runtime_id)
     factor_run_dir = Path(factor_runs_root).expanduser().resolve() / run_id
+    algorithm = str(config.get("algorithm", "rpn_ppo"))
+    if algorithm not in {"rpn_ppo", "hierarchical_ppo"}:
+        raise ValueError(f"unknown factor generation algorithm: {algorithm}")
     runner_function = ppo_runner or run_with_ppo
     device = resolve_generation_device(config.get("device"))
     logger.info(
@@ -440,7 +443,15 @@ def run_factor_generation(
     if progress_callback is not None:
         runner_kwargs["progress_callback"] = forward_progress
     try:
-        runner = runner_function(**runner_kwargs)
+        if algorithm == "hierarchical_ppo" and ppo_runner is None:
+            from single_factor.hierarchical.bridge import run_from_runtime
+            settings = dict(config.get("hierarchical", {}))
+            settings["quality"] = dict(config.get("quality", {}))
+            runner = run_from_runtime({**runtime, "max_backtrack_days": effective_backtrack}, factor_run_dir, settings,
+                int(config.get("seed", 0)), device, target_count, max_attempts,
+                operators=operator_names, progress_callback=forward_progress if progress_callback else None)
+        else:
+            runner = runner_function(**runner_kwargs)
     finally:
         _close_panel(train_panel)
         if valid_panel is not None:
@@ -449,6 +460,7 @@ def run_factor_generation(
             _close_panel(test_panel)
     finished_at = datetime.now()
     hyperparameters = {
+        "algorithm": algorithm,
         "target_factor_count": target_count,
         "max_attempts": max_attempts,
         "rollout_timesteps": rollout_timesteps,
