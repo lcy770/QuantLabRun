@@ -65,8 +65,6 @@ git push -u newrepo HEAD:main
 
 ## 实验电脑环境
 
-公司Windows训练电脑已确认有Python 3.11.7、RTX 4060和610.60驱动，可按本节末尾的“现有Python与并发下载”操作。
-
 在另一台电脑克隆并进入仓库，既有历史数据会随仓库取得。最新行情通过数据库快照准备。
 
 ```powershell
@@ -86,32 +84,6 @@ python -m single_factor.hierarchical.comparison_cli doctor
 ```
 
 `doctor` 应显示 `cuda_available=true` 和实验机 GPU。`requirements-experiments.txt` 同时安装本仓库的 backend 与 quantops，以便从干净克隆导入公共算子和表达式适配器。CPU 工程验收可使用普通 PyTorch 构建，并在 `prepare` 时指定 `--device cpu`。
-
-### 现有Python与并发下载
-
-当前公司电脑的Conda源连接失败、winget源缺失、aria2安装包下载超时。可用已有Python的标准库下载入口，默认8连接，按16MiB分段缓存，重试时续传，并核验PyTorch官方SHA256。总速度受公司网络出口和代理影响，以DL和ETA输出为准。
-
-在公司电脑的项目目录执行。首次使用时先创建实验环境，已有环境时直接执行下载命令。
-
-```powershell
-Set-Location 'C:\Users\13650\QuantLabRun-train'
-git -c http.version=HTTP/1.1 pull --ff-only
-& 'D:\Anaconda3\python.exe' -m venv 'var\venvs\dualppo'
-& 'D:\Anaconda3\python.exe' -m single_factor.download_runtime --workers 8
-```
-
-下载完成会输出 `Verified download`，已完成文件再次运行会输出 `Verified existing file`。Ctrl+C后重跑相同命令可以续传。连接中断时保留已保存分段，校验失败时清理损坏分段。该入口只下载当前Windows、Python3.11所需的Torch 2.11.0+cu128安装包。
-
-确认下载校验成功后，依次安装GPU版Torch、其余实验依赖，并检查设备。每条安装成功后执行下一条。
-
-```powershell
-$taskPython = Join-Path $PWD 'var\venvs\dualppo\Scripts\python.exe'
-& $taskPython -m pip install 'var/wheels/torch-2.11.0+cu128-cp311-cp311-win_amd64.whl' --index-url https://pypi.tuna.tsinghua.edu.cn/simple --retries 10 --timeout 120
-& $taskPython -m pip install -r requirements-experiments.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple --retries 10 --timeout 120
-& $taskPython -m single_factor.hierarchical.comparison_cli doctor
-```
-
-本节后续示例中的 `python -m`，在这个虚拟环境中执行时使用 `& $taskPython -m`。下载器回归为 `python -m pytest single_factor/tests/test_download_runtime.py -q`，使用本地合成HTTP服务验证，真实源的8连接小范围读取另有核验。
 
 ## 准备最新数据库行情
 
