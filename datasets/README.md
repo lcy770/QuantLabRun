@@ -6,9 +6,9 @@
 |---|---|---|
 | 主行情 | `backend/data_cache/master` | 5,432只股票，2021年6月18日至2026年6月16日，约836MB |
 | 历史实验面板 | `datasets/ppo_reference_20260213` | 500只股票，截至2026年2月13日，7个特征及20日收益标签，约29.5MB |
-| 当前数据核验 | `datasets/data_readiness_20261117.json` | 45个训练对比任务的日期信息和8个整日缺失记录 |
+| 历史缓存核验 | `datasets/data_readiness_20261117.json` | 45个训练对比任务的日期信息和8个整日缺失记录 |
 
-主行情缺2026年2月27日、3月2日至6日、3月9日及4月28日。最大记录日期为6月16日，完整最新面板的准备仍需补这8日真实行情。历史面板中的2025年部分换手率缺失已经标记为NaN。现有数据约定的认证状态为exploratory。
+主行情缺2026年2月27日、3月2日至6日、3月9日及4月28日。最大记录日期为6月16日，这些是旧缓存的核验结果。最新实验已改接公司ClickHouse固定快照，重新检查数据库行情的日期完整性。历史面板中的2025年部分换手率缺失已经标记为NaN。现有数据约定的认证状态为exploratory。
 
 ## 克隆后检查历史流程
 
@@ -20,4 +20,4 @@ python -m single_factor.hierarchical.comparison_cli run --protocol var/experimen
 python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/bundled_smoke_results
 ```
 
-最新45任务的方案、长短训练及GPU命令见 [实验运行指南](../experiments/dual_ppo/README.md)。本目录数据与主行情按原始字节存储，数据读取路径由配置相对位置解析。
+最新数据库取数、2025年后期至2026年的滚动任务及GPU命令见 [实验运行指南](../experiments/dual_ppo/README.md)。本目录数据与主行情按原始字节存储，数据读取路径由配置相对位置解析。

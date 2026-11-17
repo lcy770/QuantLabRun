@@ -32,27 +32,25 @@ p_new_classical 与 g_diffusion、p_new_dual 与 s_upper_ppo、a_full 与 s_uppe
 
 ## 当前数据与训练对比口径
 
-本轮以2026年6月16日为信息截止日，训练与算法对比共用同一批历史滚动任务。默认任务从2024年1月2日开始，共45个任务。20交易日收益标签最晚支持2026年5月19日的信号，最后一批任务的标签在6月16日成熟。2023年7月3日起的数据为算子提供至少100个交易日的预热。
+行情入口已接入上游2026年11月14日的ClickHouse及不可变快照代码，来源提交为 `ce9c647abca3ae710651290d1ff61bf3d1f3d683`。最新行情先物化为快照，再统一转为实验面板。
 
 | 用途 | 当前安排 |
 | --- | --- |
-| 训练与算法对比 | 同一组45个滚动任务，全部方法使用相同日期、股票池、门槛和配对预算 |
-| 每个任务内部 | F定方向、G生成和初筛、A提供上层观察、R计算终点奖励，各20个信号交易日 |
-| 时间衔接 | 前一段20日标签成熟后进入下一段，每10个交易日滚动，末批额外对齐最新成熟日 |
-| 结果含义 | 训练期对比，报告标记evaluation_scope=training，evaluation_uses_training_data=true |
-| 后续独立检验 | 使用2026年6月16日之后新增的行情，届时配置新的验收任务 |
+| 训练与算法对比 | 从2025年7月1日开始，使用同一批滚动任务 |
+| 信息截止 | 自动查询数据库中最近已收盘的行情日期，上限为2026年12月31日 |
+| 最新可评分信号 | 从实际信息截止日向前数20个交易日，保证收益标签完整 |
+| 每个任务内部 | F定方向、G生成初筛、A提供上层观察、R计算奖励，各20个信号交易日 |
+| 时间衔接 | 前段标签成熟后再进入后段，每10个交易日滚动，末批对齐最新成熟日 |
+| 算子预热 | 自动额外取前100个交易日，默认从2025年1月27日读取行情 |
+| 结果用途 | 同一批任务训练和对比，报告标记为训练期效果 |
 
-最新任务的F为2025年10月20日至11月14日，G为2025年12月15日至2026年1月13日，A为2026年2月11日至3月18日，R为2026年4月17日至5月19日。任务内部的A是上层可见观察段，R是训练奖励段。
+数据库实际截止日期及任务数以准备后的面板和 `plan --cache` 输出为准。未连接数据库时，`plan` 只输出按日历估算的计划，`information_cutoff_source=calendar_plan`。后续独立检验可通过显式future任务使用新增行情。
 
-**2026年11月17日数据准备状态为待补8个交易日。** 选定500只股票的日期并集缺2026年2月27日、3月2日至6日、3月9日及4月28日。全库5,432只股票核对3月2日和4月28日同样无记录。主缓存最大日期为2026年6月16日，`prepare-panel`已实测报告缺日，目标面板尚未生成。补入这8日真实行情后，按下方命令准备数据。核验记录保存在`var/experiments/data_readiness_20261117.json`。
-
-主缓存位于`backend/data_cache/master`，目标面板为`var/experiments/data_through_20260616`。旧PPO面板截至2026年2月13日。本轮沿用现有股票池、复权及数据约定的`exploratory`状态。
-
-模板内500只股票名单和399条历史公式随Git迁移。公式库筛选标签截至2022年11月28日。股票池历史退市覆盖、成分股时点和复权口径的验证状态保存在真实数据清单中。
+模板含固定500只股票和399条历史公式，公式库筛选标签截至2022年11月28日。股票池历史成分与复权认证状态沿用 `exploratory`。历史主缓存的缺日记录对应旧数据，最新数据库行情需要重新核验。
 
 ## 提交到 GitHub
 
-当前origin为 `https://github.com/FelixZhang423/QuantLab.git`，本地分支为 `codex/hierarchical-factor-search`。本次目标仓库为lcy770/QuantLabRun，当前机器已配置newrepo远端。提交包含源码、文档、主行情和历史实验面板。
+当前origin为 `https://github.com/FelixZhang423/QuantLab.git`，本地分支为 `codex/hierarchical-factor-search`。本次目标仓库为lcy770/QuantLabRun，当前机器已配置newrepo远端。提交包含实验源码、文档和既有历史数据。最新数据库快照与训练面板存放在var目录，按下方方式准备和迁移。
 
 ```powershell
 git status --short
@@ -63,11 +61,11 @@ git remote set-url newrepo https://github.com/lcy770/QuantLabRun.git
 git push -u newrepo HEAD:main
 ```
 
-主行情`backend/data_cache/master`和历史面板`datasets/ppo_reference_20260213`随Git提交。`var/`下新生成的面板、模型、日志和结果按运行产物管理。数据内容、SHA256清单及历史smoke命令见 [随仓库数据集](../../datasets/README.md)。
+仓库已包含历史主行情`backend/data_cache/master`和历史面板`datasets/ppo_reference_20260213`。`var/`下新生成的面板、模型、日志和结果按运行产物管理。数据内容、SHA256清单及历史smoke命令见 [随仓库数据集](../../datasets/README.md)。
 
 ## 实验电脑环境
 
-在另一台电脑克隆并进入仓库，主行情和历史面板会一并检出。
+在另一台电脑克隆并进入仓库，既有历史数据会随仓库取得。最新行情通过数据库快照准备。
 
 ```powershell
 git clone --branch main https://github.com/lcy770/QuantLabRun.git
@@ -87,49 +85,47 @@ python -m single_factor.hierarchical.comparison_cli doctor
 
 `doctor` 应显示 `cuda_available=true` 和实验机 GPU。`requirements-experiments.txt` 同时安装本仓库的 backend 与 quantops，以便从干净克隆导入公共算子和表达式适配器。CPU 工程验收可使用普通 PyTorch 构建，并在 `prepare` 时指定 `--device cpu`。
 
-## 准备并迁移行情
+## 准备最新数据库行情
 
-数据源是 `master/stocks/<股票代码>.parquet`，列包含 `date`、`ycp`、`open`、`close`、`high`、`low`、`volume`、`amount`、`TurnoverRate`。停牌、涨停和跌停标记存在时一并保留。当前电脑使用下方实际主缓存路径，另一台电脑按复制后的路径设置 `--master`。
-
-```powershell
-python -m single_factor.hierarchical.comparison_cli prepare-panel --master backend/data_cache/master --codes experiments/dual_ppo/assets/codes.json --output var/experiments/data_through_20260616 --start 2023-07-03 --end 2026-06-16
-python -m single_factor.hierarchical.comparison_cli pack-data --cache var/experiments/data_through_20260616 --archive var/experiments/data_through_20260616.zip
-```
-
-把 zip 复制到实验电脑的 `var/experiments/`，在实验电脑执行。
+首次取数需连接公司网络或VPN，并在 `backend/configs/clickhouse.local.env` 填写数据库配置。已有配置的机器直接执行准备命令。
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli unpack-data --cache var/experiments/data_through_20260616 --archive var/experiments/data_through_20260616.zip
+if (-not (Test-Path backend/configs/clickhouse.local.env)) {
+    Copy-Item backend/configs/clickhouse.env.example backend/configs/clickhouse.local.env
+}
+notepad backend/configs/clickhouse.local.env
+python -m single_factor.hierarchical.comparison_cli prepare-panel --source clickhouse --codes experiments/dual_ppo/assets/codes.json --output var/experiments/data_2025h2_2026 --training-start 2025-07-01
+python -m single_factor.hierarchical.comparison_cli plan --cache var/experiments/data_2025h2_2026
 ```
 
-解包要求目标目录为空，并逐文件验证 SHA256。也可把完整 master 复制到实验电脑后，直接在该机执行 `prepare-panel`。
+复制模板仅在本机尚无配置时执行。`prepare-panel` 自动查询实际最新日期，保存数据库快照ID、内容指纹和真实日期范围。数据准备检查官方交易日覆盖、股票日期重复、字段与20日收益标签。完整写入后才发布面板。刷新时使用新的输出目录，并追加 `--refresh`。
 
-数据准备采用因果前收盘参考价收益链，未来标签要求接下来的 20 个官方交易日均有效。代码拒绝缺失整日市场行情，不补造行情。`prepare` 在实验电脑重新解析绝对路径并核验数据身份。
+准备好的面板可迁移到训练电脑，后续训练直接读取面板。
+
+```powershell
+python -m single_factor.hierarchical.comparison_cli pack-data --cache var/experiments/data_2025h2_2026 --archive var/experiments/data_2025h2_2026.zip
+```
+
+把zip放入训练电脑的var/experiments目录，再执行。
+
+```powershell
+python -m single_factor.hierarchical.comparison_cli unpack-data --cache var/experiments/data_2025h2_2026 --archive var/experiments/data_2025h2_2026.zip
+```
+
+若已有上游数据库快照，也可用 `prepare-panel --snapshot-id <ID> --snapshot-root <快照根目录>` 离线生成面板，并指定同一股票名单与新输出目录。历史主缓存导入仍可显式使用 `--source master --master <路径>`。
 
 ## 短跑验收
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli plan
-python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_through_20260616 --output var/experiments/protocol_20260616_smoke --profile smoke --device cuda
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_smoke/protocol.json --output var/experiments/results_20260616_smoke --seeds 0
-python -m single_factor.hierarchical.comparison_cli status --output var/experiments/results_20260616_smoke
+python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_2025h2_2026 --output var/experiments/protocol_2025h2_2026_smoke --profile smoke --device cuda
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_smoke/protocol.json --output var/experiments/results_2025h2_2026_smoke --seeds 0 --nodes g_diffusion s_upper_ppo
+python -m single_factor.hierarchical.comparison_cli status --output var/experiments/results_2025h2_2026_smoke
 ```
 
-smoke 对每个学习器执行一次真实更新，覆盖五组实验，只有一个训练种子和一个搜索重复。1 秒搜索窗口可能因公式库预处理耗时返回空池，空集合奖励为零、组合持现金。
-
-当前电脑可直接执行包含合成行情的完整工程验收，覆盖真实自回归 PPO、GP、LinUCB、Double DQN、集合 PPO、旧双 PPO、消融、续训、恢复和冻结验收。
+smoke每个学习阶段执行一次真实更新，检查数据、训练及搜索链路。工程回归命令如下，测试中的行情为合成数据。
 
 ```powershell
-python -m pytest single_factor/tests/test_comparison_suite.py -q
-```
-
-主缓存补齐后，本机先运行下方真实数据准备与CPU短流程。若前面已经生成面板，直接从 `prepare` 开始。
-
-```powershell
-$taskPython = 'C:/Users/Sasuke/miniconda3/envs/alphagen/python.exe'
-& $taskPython -m single_factor.hierarchical.comparison_cli prepare-panel --master backend/data_cache/master --output var/experiments/data_through_20260616
-& $taskPython -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_through_20260616 --output var/experiments/protocol_20260616_smoke_cpu --profile smoke --device cpu
-& $taskPython -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_smoke_cpu/protocol.json --output var/experiments/results_20260616_smoke_cpu --seeds 0 --nodes g_diffusion s_upper_ppo
+python -m pytest single_factor/tests/test_comparison_database.py single_factor/tests/test_comparison_suite.py -q
 ```
 
 ## 三个配对种子的短训练
@@ -137,13 +133,13 @@ $taskPython = 'C:/Users/Sasuke/miniconda3/envs/alphagen/python.exe'
 依次执行五组，使用同一协议与结果目录。上层奖励与配权共用一次候选池和已选成员。
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_through_20260616 --output var/experiments/protocol_20260616_short --profile short --device cuda
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_short/protocol.json --output var/experiments/results_20260616_short --seeds 0 1 2 --groups generation
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_short/protocol.json --output var/experiments/results_20260616_short --seeds 0 1 2 --groups selection
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_short/protocol.json --output var/experiments/results_20260616_short --seeds 0 1 2 --groups pairing
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_short/protocol.json --output var/experiments/results_20260616_short --seeds 0 1 2 --groups reward
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_short/protocol.json --output var/experiments/results_20260616_short --seeds 0 1 2 --groups continuation weighting
-python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_20260616_short
+python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_2025h2_2026 --output var/experiments/protocol_2025h2_2026_short --profile short --device cuda
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_short/protocol.json --output var/experiments/results_2025h2_2026_short --seeds 0 1 2 --groups generation
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_short/protocol.json --output var/experiments/results_2025h2_2026_short --seeds 0 1 2 --groups selection
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_short/protocol.json --output var/experiments/results_2025h2_2026_short --seeds 0 1 2 --groups pairing
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_short/protocol.json --output var/experiments/results_2025h2_2026_short --seeds 0 1 2 --groups reward
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_short/protocol.json --output var/experiments/results_2025h2_2026_short --seeds 0 1 2 --groups continuation weighting
+python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_2025h2_2026_short
 ```
 
 | 配置 | 结构预训练 | 下层训练 / 上层训练 / 续训预算，每节点每种子 | 每次搜索预算 |
@@ -163,27 +159,27 @@ python -m single_factor.hierarchical.comparison_cli summarize --output var/exper
 根据训练期配对对比确定主要组后，在新的 long 协议执行所选节点。下面命令覆盖生成主对照、新双 PPO 与旧双 PPO，自动补齐共享预训练及依赖。
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_through_20260616 --output var/experiments/protocol_20260616_long --profile long --device cuda
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_long/protocol.json --output var/experiments/results_20260616_long --seeds 0 1 2 --nodes g_rpn_original g_rpn_unified g_random g_pretrained g_diffusion g_gp s_upper_ppo p_old_dual
+python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_2025h2_2026 --output var/experiments/protocol_2025h2_2026_long --profile long --device cuda
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_long/protocol.json --output var/experiments/results_2025h2_2026_long --seeds 0 1 2 --nodes g_rpn_original g_rpn_unified g_random g_pretrained g_diffusion g_gp s_upper_ppo p_old_dual
 ```
 
 可把 `--nodes` 后的列表替换为选定节点。完整五组的长训练可执行下面一行。
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_20260616_long/protocol.json --output var/experiments/results_20260616_long --seeds 0 1 2 --groups generation selection pairing reward continuation weighting
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/protocol_2025h2_2026_long/protocol.json --output var/experiments/results_2025h2_2026_long --seeds 0 1 2 --groups generation selection pairing reward continuation weighting
 ```
 
 long 使用独立初始化与完整长预算，short的训练期对比用于选择需要长训练的实验组。续训机制对比由 c_lower、c_upper、c_alternating 单独实现。
 
-45个任务的全部限时搜索也计入总成本。long中每个生成器、每个训练种子的限时搜索预算为45×3×1800秒，约67.5小时，另有固定尝试评价和模型训练。完整五组的全量长训加评价会超过1至2周，执行范围依据short结果和实际时间预算确定。
+任务数N由实际数据截止日决定。long中每个生成器、每个训练种子的限时搜索预算为N×3×1800秒，另有固定尝试评价和模型训练。若形成19个任务，仅该项约28.5小时。1至2周内先完成short，再选择主要组长训。
 
 ## 断点恢复和结果
 
 中断后重复原 `run` 命令即可恢复。模型、优化器、GP 种群、DQN 经验池、LinUCB 统计量、候选池及随机状态在每次完整更新后原子保存。完成节点会跳过。源码、配置或行情身份变化时重新准备协议并使用新的结果目录。
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli status --output var/experiments/results_20260616_long
-python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_20260616_long
+python -m single_factor.hierarchical.comparison_cli status --output var/experiments/results_2025h2_2026_long
+python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_2025h2_2026_long
 ```
 
 结果目录包含 `comparison.csv`、`weight_comparison.csv`、`seed_means.json`、`paired_differences.json`，以及 `seed_<种子>/nodes/<节点>/training/` 内的逐次报告。汇总表和逐次报告都记录训练期评价用途。报告记录表达式、固定方向、成员、奖励分项、候选池身份、训练成本与逐日净值。`manifest.json` 保存环境版本，`source_snapshot/` 保存本次源码。
@@ -193,10 +189,10 @@ python -m single_factor.hierarchical.comparison_cli summarize --output var/exper
 训练期对比完成后，可冻结需要后续跟踪的方法及检查点。
 
 ```powershell
-python -m single_factor.hierarchical.comparison_cli freeze --protocol var/experiments/protocol_20260616_long/protocol.json --output var/experiments/results_20260616_long --nodes p_new_dual p_new_classical p_old_dual --seeds 0 1 2 --selection var/experiments/results_20260616_long/frozen_selection.json
+python -m single_factor.hierarchical.comparison_cli freeze --protocol var/experiments/protocol_2025h2_2026_long/protocol.json --output var/experiments/results_2025h2_2026_long --nodes p_new_dual p_new_classical p_old_dual --seeds 0 1 2 --selection var/experiments/results_2025h2_2026_long/frozen_selection.json
 ```
 
-本轮默认协议全部为训练任务，冻结记录的selection_basis为training。后续独立检验需要6月16日之后的行情及对应future任务配置。当前协议直接调用evaluate会提示缺少test任务。历史显式F/G/A/R/future协议继续支持原来的冻结验收流程。
+本轮默认协议全部为训练任务，冻结记录的selection_basis为training。后续独立检验需使用冻结检查点之后新增的行情及对应future任务配置。当前协议直接调用evaluate会提示缺少test任务。历史显式F/G/A/R/future协议继续支持原来的冻结验收流程。
 
 ## Top50 与配权口径
 

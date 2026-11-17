@@ -13,7 +13,7 @@ import zipfile
 
 import torch
 
-from .comparison_data import design_tasks, prepare_panel
+from .comparison_data import TRAINING_START, design_tasks, prepare_database_panel, prepare_panel
 from .comparison_study import TEMPLATES, experiment_nodes, prepare_protocol, resolve_nodes, summarize_study
 from .comparison_training import Study
 from .io import append_json, digest, run_lock, save_json
@@ -191,18 +191,28 @@ def main():
     plan = commands.add_parser("plan")
     plan.add_argument("--nodes", nargs="+")
     plan.add_argument("--groups", nargs="+")
+    plan.add_argument("--cache", help="read the actual information cutoff from a prepared panel")
+    plan.add_argument("--training-start")
+    plan.add_argument("--end", help="information cutoff including matured labels")
     prepare = commands.add_parser("prepare")
     prepare.add_argument("--cache", required=True)
     prepare.add_argument("--output", required=True)
     prepare.add_argument("--profile", choices=("smoke", "short", "long"), default="short")
     prepare.add_argument("--device", default="auto")
     prepare.add_argument("--tasks-config", help="explicit historical/test tasks for local smoke validation")
+    prepare.add_argument("--training-start")
+    prepare.add_argument("--end", help="information cutoff, defaults to the prepared panel end")
     panel = commands.add_parser("prepare-panel")
-    panel.add_argument("--master", required=True)
+    panel.add_argument("--source", choices=("clickhouse", "master"), help="defaults to ClickHouse; --master preserves historical imports")
+    panel.add_argument("--master")
     panel.add_argument("--codes", default=str(TEMPLATES / "assets/codes.json"))
     panel.add_argument("--output", required=True)
-    panel.add_argument("--start", default="2023-07-03")
-    panel.add_argument("--end", default="2026-06-16")
+    panel.add_argument("--training-start", default=TRAINING_START)
+    panel.add_argument("--start", help="raw data start, defaults to 100 sessions before training")
+    panel.add_argument("--end", help="defaults to the latest available completed trading day")
+    panel.add_argument("--snapshot-id", help="reuse an existing database snapshot offline")
+    panel.add_argument("--snapshot-root", help="directory holding immutable database snapshots")
+    panel.add_argument("--refresh", action="store_true", help="capture revised database data in a new snapshot")
     for command in ("run", "freeze", "evaluate"):
         sub = commands.add_parser(command)
         sub.add_argument("--protocol", required=True)
@@ -228,12 +238,23 @@ def main():
         result = environment_report()
     elif args.command == "plan":
         ordered, requested = resolve_nodes(args.nodes, args.groups)
-        tasks, dates = design_tasks("<DATA_CACHE>")
+        tasks, dates = design_tasks(args.cache or "<DATA_CACHE>", start=args.training_start, test_cutoff=args.end)
         result = {"ordered_nodes": ordered, "requested_nodes": requested, "definitions": experiment_nodes(), "dates": dates,
                   "first_training_task": tasks[0], "latest_training_task": tasks[-1],
                   "comparison_task_names": [task["name"] for task in tasks], "locked_test": None}
     elif args.command == "prepare-panel":
-        result = prepare_panel(args.master, args.codes, args.output, start=args.start, end=args.end)
+        source = args.source or ("master" if args.master else "clickhouse")
+        if source == "master":
+            if not args.master or args.snapshot_id or args.snapshot_root or args.refresh:
+                parser.error("master source requires --master and accepts no snapshot options")
+            result = prepare_panel(args.master, args.codes, args.output,
+                                   start=args.start or "2023-07-03", end=args.end or "2026-06-16")
+        else:
+            if args.master:
+                parser.error("ClickHouse source cannot be combined with --master")
+            result = prepare_database_panel(args.codes, args.output, training_start=args.training_start,
+                start=args.start, end=args.end, snapshot_id=args.snapshot_id,
+                snapshot_root=args.snapshot_root, refresh=args.refresh)
     elif args.command == "prepare":
         tasks = None
         if args.tasks_config:
@@ -245,7 +266,8 @@ def main():
                         cache = Path(task[segment]["cache"])
                         if not cache.is_absolute():
                             task[segment]["cache"] = str((task_config.parent / cache).resolve())
-        result = prepare_protocol(args.cache, args.output, args.profile, args.device, tasks)
+        date_options = {"training_start": args.training_start, "cutoff": args.end} if args.training_start or args.end else {}
+        result = prepare_protocol(args.cache, args.output, args.profile, args.device, tasks, **date_options)
         result = {"protocol": str(Path(args.output).resolve() / "protocol.json"), "dates": result["dates"]}
     elif args.command == "run":
         result = run_study(args.protocol, args.output, args.seeds, args.nodes, args.groups)

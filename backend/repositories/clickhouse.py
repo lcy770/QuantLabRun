@@ -27,8 +27,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from dataclasses import dataclass
-from datetime import date, datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -123,6 +123,7 @@ SELECT
     toString(count()) AS rows,
     min(timestamps) AS start_date,
     max(timestamps) AS end_date,
+    toString(argMax(tuple(open), timestamps).1) AS latest_open,
     toString(argMax(close, timestamps)) AS latest_close,
     toString(argMax(vol, timestamps)) AS latest_volume,
     toString(argMax(amount, timestamps)) AS latest_amount,
@@ -597,12 +598,13 @@ _cache_generation: Dict[str, int] = {}
 class LiveResult:
     """一次业务查询的结果：数据本身 + 是否命中缓存 + 数据对应的查询时刻。"""
 
-    __slots__ = ("data", "cached", "queried_at")
+    __slots__ = ("data", "cached", "queried_at", "cache_ttl_seconds")
 
-    def __init__(self, data: Any, cached: bool, queried_at: str) -> None:
+    def __init__(self, data: Any, cached: bool, queried_at: str, cache_ttl_seconds: float = 0) -> None:
         self.data = data
         self.cached = cached
         self.queried_at = queried_at
+        self.cache_ttl_seconds = cache_ttl_seconds
 
 
 def _key_lock(key: str) -> threading.Lock:
@@ -613,11 +615,16 @@ def _key_lock(key: str) -> threading.Lock:
         return lock
 
 
-def clear_cache() -> None:
+def clear_cache(keys: Optional[Iterable[str]] = None) -> None:
     """清空 TTL 缓存（测试用）。"""
     with _cache_guard:
-        _cache_values.clear()
-        _cache_generation.clear()
+        if keys is None:
+            _cache_values.clear()
+            _cache_generation.clear()
+        else:
+            for key in keys:
+                _cache_values.pop(key, None)
+                _cache_generation.pop(key, None)
 
 
 def _cached(key: str, ttl: float, produce: Callable[[], Any]) -> LiveResult:
@@ -632,19 +639,19 @@ def _cached(key: str, ttl: float, produce: Callable[[], Any]) -> LiveResult:
     """
     entry = _cache_values.get(key)
     if entry is not None and ttl > 0 and time.monotonic() - entry[0] < ttl:
-        return LiveResult(entry[2], True, entry[1])
+        return LiveResult(entry[2], True, entry[1], ttl)
     seen = _cache_generation.get(key)  # 进锁前记下当前代数
     with _key_lock(key):
         entry = _cache_values.get(key)
         within_ttl = entry is not None and ttl > 0 and time.monotonic() - entry[0] < ttl
         joined = entry is not None and _cache_generation.get(key) != seen
         if entry is not None and (within_ttl or joined):
-            return LiveResult(entry[2], within_ttl, entry[1])
+            return LiveResult(entry[2], within_ttl, entry[1], ttl)
         data = produce()
         queried_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _cache_values[key] = (time.monotonic(), queried_at, copy.deepcopy(data))
         _cache_generation[key] = _cache_generation.get(key, 0) + 1
-        return LiveResult(data, False, queried_at)
+        return LiveResult(data, False, queried_at, ttl)
 
 
 # ---------- 业务查询 ----------
@@ -754,6 +761,9 @@ def live_stock_rows(
     避免筛选预览在 QL_CH_CACHE_TTL=0 的部署里反复打全市场聚合。
     """
     settings = settings or resolve_settings()
+    # 全市场历史聚合与分页大小无关，需要面板级查询预算。
+    settings = replace(settings, timeout=max(settings.timeout, settings.panel_timeout),
+                       max_execution_time=max(settings.max_execution_time, settings.panel_max_execution_time))
     client = _client(settings, client)
 
     def produce() -> List[Dict[str, Any]]:
@@ -784,6 +794,7 @@ def live_stock_rows(
                     "start_date": str(row.get("start_date") or ""),
                     "end_date": end_date,
                     "latest_date": end_date,
+                    "latest_open": to_float(row.get("latest_open")),
                     "latest_close": to_float(row.get("latest_close")),
                     "latest_volume": to_int(row.get("latest_volume")),
                     "latest_amount": to_float(row.get("latest_amount")),
@@ -969,3 +980,31 @@ def prewarm() -> None:
                 pass
 
     threading.Thread(target=_run, name="live-db-prewarm", daemon=True).start()
+
+def live_stock_history(code: str, days: int, end: date | None = None) -> List[Dict[str, Any]]:
+    """Return the latest daily observations for a single stock."""
+    if not re.fullmatch(r"[0-9]{6}", code) or not 1 <= days <= 250:
+        raise ValueError("无效的股票代码或交易日数量")
+    end = end or date.today()
+    # Use a calendar window wide enough for weekends and exchange holidays.
+    start = end - timedelta(days=days * 2 + 30)
+    before = end + timedelta(days=1)
+    fields = {
+        "open": "open", "close": "close", "high": "high", "low": "low", "ycp": "previous_close",
+        "vol": "volume", "amount": "amount", "ChangePCT": "change_pct",
+        "RangePCT": "range_pct", "TurnoverRate": "turnover_pct", "Ifsuspend": "suspended",
+    }
+    columns = ", ".join(f"toString({field}) AS daily_{alias}" for field, alias in fields.items())
+    rows = _client(resolve_settings()).query(f"""
+        SELECT toString(toDate(timestamps)) AS trade_date, {columns}
+        FROM {DAILY_TABLE}
+        WHERE category = 'stock' AND code = '{code}'
+          AND timestamps >= '{start.isoformat()}' AND timestamps < '{before.isoformat()}'
+        ORDER BY timestamps DESC
+        LIMIT 1 BY toDate(timestamps)
+        LIMIT {days:d}
+    """)
+    return [
+        {"date": row["trade_date"], **{alias: to_float(row.get(f"daily_{alias}")) for alias in fields.values()}}
+        for row in reversed(rows)
+    ]

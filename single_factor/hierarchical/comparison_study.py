@@ -81,7 +81,7 @@ def resolve_nodes(names=None, groups=None):
     return ordered, requested
 
 
-def prepare_protocol(cache, output, profile="short", device="auto", tasks=None):
+def prepare_protocol(cache, output, profile="short", device="auto", tasks=None, *, training_start=None, cutoff=None):
     """生成本机解析配置，Git 中的模板及公式库保持相对路径。"""
     output = Path(output).resolve()
     if (output / "protocol.json").exists():
@@ -91,9 +91,11 @@ def prepare_protocol(cache, output, profile="short", device="auto", tasks=None):
     config = json.loads((TEMPLATES / "base.json").read_text(encoding="utf-8"))
     cache = Path(cache).resolve()
     if tasks is None:
-        tasks, dates = design_tasks(cache)
+        tasks, dates = design_tasks(cache, start=training_start, test_cutoff=cutoff)
         coverage = validate_cache(cache, tasks, config["lookback"], config["target_horizon"], config["grammar"]["fields"])
     else:
+        if training_start or cutoff:
+            raise ValueError("explicit task dates cannot be combined with rolling date overrides")
         tasks = copy.deepcopy(tasks)
         dates = {"mode": "explicit_historical_or_test_protocol", "training_tasks": sum(t["role"] == "train" for t in tasks),
                  "comparison_uses_training_data": not any(t["role"] == "development" for t in tasks),

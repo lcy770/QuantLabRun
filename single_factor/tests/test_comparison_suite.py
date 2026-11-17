@@ -179,7 +179,7 @@ def test_next_open_accounting_fees_missing_prices_and_cash():
 
 
 def test_calendar_split_and_insufficient_cache(protocol, tmp_path):
-    tasks, summary = design_tasks(tmp_path)
+    tasks, summary = design_tasks(tmp_path, start="2024-01-02", test_cutoff="2026-06-16")
     assert summary["mode"] == "shared_training_comparison"
     assert summary["training_tasks"] == summary["comparison_tasks"] == len(tasks)
     assert len(tasks) > 27
@@ -191,7 +191,7 @@ def test_calendar_split_and_insufficient_cache(protocol, tmp_path):
     assert summary["independent_test_available"] is False
     assert all(task["role"] == "train" for task in tasks)
     assert tasks[-1]["feedback"]["end"] == "2026-05-19"
-    heldout, heldout_summary = design_tasks(tmp_path, development_cutoff="2026-03-31")
+    heldout, heldout_summary = design_tasks(tmp_path, start="2024-01-02", development_cutoff="2026-03-31", test_cutoff="2026-06-16")
     assert heldout_summary["training_tasks"] == 27
     assert heldout[-2]["search"]["start"] == "2025-09-25"
     assert heldout[-1]["validation"]["end"] == "2026-03-03"

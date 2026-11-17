@@ -1,7 +1,7 @@
 """公司 ClickHouse 数据源：股票池选样、因子面板与回测共用。
 
-股票池、因子生成和因子回测都不再依赖 ``data_cache/master``：候选、窗口内
-有效行数/成交额、因子面板和回测面板全部直接从公司库读取。
+股票池候选、窗口内有效行数/成交额直接从公司库读取；研究任务通过
+快照存储层调用本模块，将公司库数据物化后复用。
 
 约定：
 - 只读。SQL 由本模块拼接，代码/日期都经过规范化与转义，再交给
@@ -40,13 +40,13 @@ def is_company_source(value: Any) -> bool:
 def resolve_data_source(
     requested: Any = None, manifest: Optional[Mapping[str, Any]] = None
 ) -> str:
-    """显式参数 > 池/运行 manifest 里的 data_source > 本地（兼容旧数据）。"""
+    """兼容现有平台的来源解析，数据库实验直接调用固定快照接口。"""
     value = requested
     if not str(value or "").strip() and manifest:
         value = manifest.get("data_source")
     return "clickhouse" if is_company_source(value) else "local"
 
-# 与本地 data_cache/master 面板字段一一对应（不含 date / code）。
+# 统一行情面板字段（不含 date / code）。
 # 因子生成配置里的 38 个字段是它的子集；回测面板默认加载这一整组，保证表达式
 # 在切换数据源后仍能解析到相同字段名。
 DEFAULT_PANEL_FIELDS: Tuple[str, ...] = (
@@ -503,6 +503,20 @@ def meta(
         "fields": ["date", "code", *DEFAULT_PANEL_FIELDS],
         "source_signature": SOURCE_SIGNATURE,
     }
+
+
+def trading_dates(start, end):
+    """公司股票行情中的实际交易日；仅返回日期，不加载行情面板。"""
+    where = _where_sql(None, start, end, category="stock", market_code=None)
+    sql = f"SELECT DISTINCT toString(toDate(d.timestamps)) AS date FROM {live_db.DAILY_TABLE} AS d WHERE {where} ORDER BY date"
+    settings = live_db.resolve_settings()
+    def query():
+        payload = live_db._client(settings).query_bytes(sql, timeout=settings.panel_timeout,
+            max_execution_time=settings.panel_max_execution_time)
+        import io
+        import pandas as pd
+        return sorted(set(pd.read_parquet(io.BytesIO(payload))["date"].astype(str)))
+    return live_db._cached(f"trading_dates:{start}:{end}", settings.universe_ttl, query).data
 
 
 def selection_days(
