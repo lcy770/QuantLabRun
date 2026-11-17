@@ -235,9 +235,11 @@ def test_field_catalog_file_has_expected_categories():
 
 
 def _stub_universe(monkeypatch, items=None):
+    """模拟候选查询及来源地址，使接口单测可以在离线环境运行。"""
     monkeypatch.setattr(
         live_db, "live_stock_rows", lambda *args, **kwargs: _live(items or _items())
     )
+    monkeypatch.setattr(live_db, "target_label", lambda settings=None: "test-clickhouse:8123")
 
 
 def test_universe_options_reports_facets_from_company_db(master, monkeypatch):
@@ -376,6 +378,7 @@ def test_create_pool_builds_company_payload_and_spawns_job(master, monkeypatch):
     assert payload["provenance"]["source"] == "clickhouse"
     assert payload["provenance"]["daily_table"] == live_db.DAILY_TABLE
     assert payload["provenance"]["dim_table"] == live_db.DIM_TABLE
+    assert payload["provenance"]["endpoint"] == "test-clickhouse:8123"
     assert payload["provenance"]["matched_total"] == 2
     assert payload["provenance"]["selection_mode"] == "all"
     assert payload["provenance"]["selected_total"] == 2
