@@ -99,9 +99,17 @@ def load_selection_config(path):
     lower.setdefault("shortlist_size", 32)
     lower.setdefault("diffusion_steps", config["corpus"]["noise_steps"])
     lower.setdefault("perturbation_steps", lower["diffusion_steps"])
+    if type(lower.get("learned_stop", False)) is not bool:
+        raise ValueError("lower learned_stop must be a boolean")
+    if type(lower.get("quality_delta_reward", False)) is not bool:
+        raise ValueError("lower quality_delta_reward must be a boolean")
+    if lower.get("quality_delta_reward", False) and not lower.get("learned_stop", False):
+        raise ValueError("quality_delta_reward requires learned_stop")
     upper.setdefault("episodes_per_batch", 4)
     upper.setdefault("joint_iterations", 4)
     upper.setdefault("max_members", 10)
+    if upper["max_members"] is not None and (type(upper["max_members"]) is not int or upper["max_members"] < 1):
+        raise ValueError("max_members must be a positive integer or null for stop-only selection")
     upper.setdefault("pool_attempts", 128)
     search = config.setdefault("search", {})
     for name, value in {"candidate_capacity": 128, "max_attempts": 10000,
@@ -124,7 +132,7 @@ def load_selection_config(path):
     positive = [(config, "initial_seeds"), (reward, "block_days"), (reward, "calibration_samples"),
                 (config["corpus"], "noise_steps"), (config["corpus"], "count"), (pretrain, "batch_size"),
                 (lower, "batch_formulas"), (lower, "shortlist_size"), (lower, "diffusion_steps"),
-                (upper, "episodes_per_batch"), (upper, "max_members"), (upper, "pool_attempts"),
+                (upper, "episodes_per_batch"), (upper, "pool_attempts"),
                 (search, "candidate_capacity"), (search, "max_attempts")]
     if any(type(section[name]) is not int or section[name] < 1 for section, name in positive):
         raise ValueError("positive integer size/horizon settings are required")

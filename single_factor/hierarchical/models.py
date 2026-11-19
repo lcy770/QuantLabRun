@@ -3,13 +3,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import repeat
 import math
+from time import perf_counter
 
 import torch
 from torch import nn
 from torch.distributions import Categorical
 
 from .ast import Node, replace, walk
+from .io import check_budget
 from .rpn import RPNKernel, RPNProgram, token_vocabulary
 
 
@@ -160,7 +163,7 @@ class LowerTask:
 class LowerPolicy(nn.Module):
     # 下层将每次编辑分为选择位置、选择该位置的合法替换两个条件动作。
     def __init__(self, grammar, width=32, noise_steps=4, use_task=False, representation="ast", use_position=False,
-                 edit_backend="ast"):
+                 edit_backend="ast", learned_stop=False):
         """创建下层编辑策略及独立的价值编码器，校验编码表示与编辑后端的兼容性。
 
         noise_steps 决定去噪时间嵌入范围，可选任务条件和位置条件均以零贡献初始化。
@@ -186,6 +189,7 @@ class LowerPolicy(nn.Module):
         self.node_head = mlp(3 * width, width, 1)
         self.edit_head = mlp(4 * width, width, 1)
         self.value_head = mlp(2 * width, width, 1)
+        self.stop_head = nn.Linear(2 * width, 1) if learned_stop else None
         self.use_task = use_task
         if use_task:
             # 新条件投影末层零初始化，旧检查点迁移时新增分支的初始贡献为 0。
@@ -306,7 +310,10 @@ class LowerPolicy(nn.Module):
         for specification in specifications:
             tree, step, action = specification[:3]
             tree = self.edit_kernel.from_node(tree)
-            action = self.edit_kernel.native_edit(tree, action)
+            if action is not None:
+                action = self.edit_kernel.native_edit(tree, action)
+            elif self.stop_head is None:
+                raise ValueError("STOP requires a learned lower stop action")
             actions = (tuple(self.edit_kernel.native_edit(tree, edit) for edit in specification[3])
                        if len(specification) > 3 and specification[3] else self.edit_kernel.edits(tree))
             task = specification[4] if len(specification) > 4 else None
@@ -327,6 +334,7 @@ class LowerPolicy(nn.Module):
         edit_roots, edit_nodes, edit_times, edit_replacements = [], [], [], []
         position_tasks, edit_tasks = [], []
         position_paths, edit_paths = [], []
+        stop_contexts = []
         for tree, step, action, paths, nodes, grouped, ordered, task in prepared:
             position_roots.extend([indices[tree]] * len(paths))
             position_nodes.extend(indices[nodes[path]] for path in paths)
@@ -342,6 +350,11 @@ class LowerPolicy(nn.Module):
                 bias = self.task_embedding(task, self.actor_encoder, self.actor_task, encoded)
                 position_tasks.extend([bias] * len(paths))
                 edit_tasks.extend([bias] * len(ordered))
+            if self.stop_head is not None:
+                time = self.actor_time.weight[step]
+                if self.use_task:
+                    time = time + bias
+                stop_contexts.append(torch.cat((encoded[tree], time)))
         def select(values):
             """按节点索引从共享编码矩阵取行，返回当前设备上的批量表示。"""
             return matrix[torch.tensor(values, device=matrix.device)]
@@ -359,37 +372,49 @@ class LowerPolicy(nn.Module):
         if self.use_task:
             position_logits = position_logits + (position_features * torch.stack(position_tasks)).sum(1) / math.sqrt(self.width)
             edit_logits = edit_logits + (select(edit_replacements) * torch.stack(edit_tasks)).sum(1) / math.sqrt(self.width)
-        critic_forest = [p[0] for p in prepared]
-        if self.use_task:
-            critic_forest.extend(tree for *_, task in prepared if task is not None for tree in task.trees)
-        critic = self.critic_encoder.encode([], roots=critic_forest)
-        critic_contexts = []
-        for tree, step, *_, task in prepared:
-            time = self.critic_time.weight[step]
-            if self.use_task:
-                time = time + self.task_embedding(task, self.critic_encoder, self.critic_task, critic)
-            critic_contexts.append(torch.cat((critic[tree], time)))
-        values = self.value_head(torch.stack(critic_contexts)).flatten()
+        values = self.state_values([(tree, step, task) for tree, step, *_, task in prepared])
+        stop_logits = self.stop_head(torch.stack(stop_contexts)).flatten() if stop_contexts else None
         result, cursor, edit_cursor = [], 0, 0
         for index, (_, _, action, paths, _, grouped, ordered, _) in enumerate(prepared):
-            positions = Categorical(logits=position_logits[cursor:cursor + len(paths)])
+            logits = position_logits[cursor:cursor + len(paths)]
+            if stop_logits is not None:
+                logits = torch.cat((logits, stop_logits[index:index+1]))
+            positions = Categorical(logits=logits)
             cursor += len(paths)
-            i = paths.index(action.path)
             distributions = []
             for path in paths:
                 size = len(grouped[path])
                 distributions.append(Categorical(logits=edit_logits[edit_cursor:edit_cursor + size]))
                 edit_cursor += size
-            j = grouped[action.path].index(action)
             entropy = positions.entropy() + sum(positions.probs[k] * d.entropy() for k, d in enumerate(distributions))
-            result.append((positions.logits[i] + distributions[i].logits[j], values[index], entropy))
+            if action is None:
+                logp = positions.logits[-1]
+            else:
+                i = paths.index(action.path)
+                j = grouped[action.path].index(action)
+                logp = positions.logits[i] + distributions[i].logits[j]
+            result.append((logp, values[index], entropy))
         return result
+
+    def state_values(self, states):
+        """共享编码，批量估计给定公式状态的后续回报。"""
+        roots = [tree for tree, _, _ in states]
+        if self.use_task:
+            roots.extend(tree for _, _, task in states if task is not None for tree in task.trees)
+        critic = self.critic_encoder.encode([], roots=roots)
+        contexts = []
+        for tree, step, task in states:
+            time = self.critic_time.weight[step]
+            if self.use_task:
+                time = time + self.task_embedding(task, self.critic_encoder, self.critic_task, critic)
+            contexts.append(torch.cat((critic[tree], time)))
+        return self.value_head(torch.stack(contexts)).flatten()
 
     def rows(self, rows):
         """从轨迹行提取状态、动作、合法动作集合和任务，批量返回 PPO 所需的概率、价值及熵。"""
         return self.evaluate_batch([(r["tree"], r["step"], r["action"], r.get("legal_actions"), r.get("task")) for r in rows])
 
-    def _sampling_distributions(self, tree, step, query, legal_actions=None):
+    def _sampling_distributions(self, tree, step, query, legal_actions=None, *, allow_stop=True):
         """保持采样时的编码批次，构造位置分布及指定位置的条件替换分布。"""
         grouped = defaultdict(list)
         if legal_actions is not None:
@@ -408,6 +433,9 @@ class LowerPolicy(nn.Module):
         position_logits = self.node_head(contexts).flatten()
         if self.use_task:
             position_logits = position_logits + node_features @ query / math.sqrt(self.width)
+        if self.stop_head is not None and allow_stop:
+            stop_time = time + query if self.use_task else time
+            position_logits = torch.cat((position_logits, self.stop_head(torch.cat((enc[tree], stop_time)))))
 
         def replacements_at(index):
             """仅编码当前位置的替换，与实际采样使用相同矩阵形状及计算顺序。"""
@@ -426,39 +454,56 @@ class LowerPolicy(nn.Module):
     def replay_logp(self, row):
         """不抽样、不改旧概率，按录制时的批次布局复核指定动作的联合概率。"""
         tree = self.edit_kernel.from_node(row["tree"])
-        action = self.edit_kernel.native_edit(tree, row["action"])
         actions = tuple(self.edit_kernel.native_edit(tree, edit)
                         for edit in (row.get("legal_actions") or self.edit_kernel.edits(tree)))
         query = self.task_embedding(row.get("task"), self.actor_encoder, self.actor_task) if self.use_task else None
         paths, positions, replacements_at, _ = self._sampling_distributions(tree, row["step"], query, actions)
+        if row["action"] is None:
+            if self.stop_head is None:
+                raise ValueError("STOP requires a learned lower stop action")
+            return positions.logits[-1]
+        action = self.edit_kernel.native_edit(tree, row["action"])
         index = paths.index(action.path)
         choices, edits = replacements_at(index)
         return positions.logits[index] + edits.logits[choices.index(action)]
 
     @torch.no_grad()
-    def sample(self, tree, remaining=None, record=True, task=None):
+    def sample(self, tree, remaining=None, record=True, task=None, *, time_edits=False, allow_stop=True):
         # 从扰动后的表达式开始，按剩余步数逐步生成反向编辑轨迹。
-        """从输入公式执行 remaining 次反向编辑，返回终点 Node 和可选的动作轨迹。
+        """执行反向编辑，返回终点和可选轨迹。学习 STOP 时一直编辑到模型选择停止。
 
         每步先采样位置，再采样该处替换，整个过程沿用同一任务条件。
         record 启用时保存旧概率、价值与合法动作，关闭时按选中位置枚举替换以节省计算。
         """
-        remaining = self.noise_steps if remaining is None else remaining
-        if not 0 <= remaining <= self.noise_steps:
-            raise ValueError("remaining diffusion steps invalid")
+        if self.stop_head is not None and allow_stop:
+            if remaining is not None:
+                raise ValueError("learned STOP does not use a fixed editor horizon")
+            # 学习何时停止的策略只看当前公式和任务，时间嵌入保持固定。
+            steps = repeat(1)
+        else:
+            remaining = self.noise_steps if remaining is None else remaining
+            if not 0 <= remaining <= self.noise_steps:
+                raise ValueError("remaining diffusion steps invalid")
+            steps = range(remaining, 0, -1)
         tree = self.edit_kernel.from_node(tree)
         if self.edit_backend == "rpn":
             self.edit_kernel.validate(tree)
         rows = []
         query = self.task_embedding(task, self.actor_encoder, self.actor_task) if self.use_task else None
         critic_bias = self.task_embedding(task, self.critic_encoder, self.critic_task) if self.use_task and record else None
-        for step in range(remaining, 0, -1):
+        for step in steps:
+            check_budget()
             actions = self.edit_kernel.edits(tree) if record else None
-            _, positions, replacements_at, ordered = self._sampling_distributions(tree, step, query, actions)
+            paths, positions, replacements_at, ordered = self._sampling_distributions(
+                tree, step, query, actions, allow_stop=allow_stop)
+            if self.stop_head is not None and allow_stop and not bool(positions.probs[-1] > 0):
+                raise FloatingPointError("learned STOP probability underflowed to zero")
             i = int(positions.sample())
-            choices, edits = replacements_at(i)
-            j = int(edits.sample())
-            action = choices[j]
+            action, logp = None, positions.logits[i]
+            if i < len(paths):
+                choices, edits = replacements_at(i)
+                j = int(edits.sample())
+                action, logp = choices[j], logp + edits.logits[j]
             if record:
                 # 保存旧策略概率、价值和动作前状态，PPO 更新时按原条件重放。
                 critic = self.critic_encoder.encode([], roots=[tree])[tree]
@@ -467,19 +512,24 @@ class LowerPolicy(nn.Module):
                     critic_time = critic_time + critic_bias
                 value = self.value_head(torch.cat((critic, critic_time))).squeeze()
                 row = {"tree": tree, "step": step, "action": action,
-                       "logp": float(positions.logits[i] + edits.logits[j]), "value": float(value),
+                       "logp": float(logp), "value": float(value),
                        "legal_actions": ordered}
-                if self.edit_backend == "rpn":
+                if self.edit_backend == "rpn" and action is not None:
                     row["token_edit"] = {"start": action.start, "stop": action.stop,
                                          "replacement_tokens": action.replacement.tokens}
                 if task is not None:
                     row["task"] = task
             # 原生 RPN 在内核中直接替换词元区间，轨迹保存其起止位置。
-            tree = (self.edit_kernel.apply(tree, action) if self.edit_backend == "rpn"
-                    else replace(tree, action.path, action.replacement))
+            if action is not None:
+                tree = (self.edit_kernel.apply(tree, action) if self.edit_backend == "rpn"
+                        else replace(tree, action.path, action.replacement))
             if record:
                 row["after"] = tree
+                if time_edits:
+                    row["edit_completed_at"] = perf_counter()
                 rows.append(row)
+            if action is None:
+                break
         # 在金融评价和存储边界转换为项目通用 Node，内部编辑状态由后端管理。
         return self.edit_kernel.to_node(tree), rows
 

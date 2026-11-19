@@ -1,8 +1,12 @@
 """冻结起点批采样、候选准入以及上层成员选择的真实执行路径。"""
 from __future__ import annotations
 
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
+from functools import lru_cache
+from math import fsum
 import random
 from time import perf_counter
 
@@ -100,11 +104,9 @@ class CandidatePool:
             del self.candidates[self.capacity:]
 
 
-def collect_proposal(generator, evaluator, observation, settings, seed, proposal_id, record=True):
-    """用独立随机流生成一个主候选，并测量选起点、扩散与真实评价的完整耗时。"""
-    device = getattr(generator, "device", None)
-    if device is None:
-        device = next(generator.parameters()).device
+@contextmanager
+def proposal_rng(device, seed):
+    """只重置本次采样使用的 CPU 和目标 GPU 随机流，退出后恢复。"""
     devices = []
     if device.type == "cuda":
         # 配置中的默认cuda没有编号，fork_rng需要解析后的实际GPU编号。
@@ -113,17 +115,28 @@ def collect_proposal(generator, evaluator, observation, settings, seed, proposal
             index = torch.cuda.current_device()
         devices = [index]
     with torch.random.fork_rng(devices=devices):
-        # 仅重置本提案使用的随机流，CPU基线也能保持GPU随机状态隔离。
         torch.random.default_generator.manual_seed(seed)
         if devices:
             with torch.cuda.device(devices[0]):
                 torch.cuda.manual_seed(seed)
+        yield
+
+
+def collect_proposal(generator, evaluator, observation, settings, seed, proposal_id, record=True):
+    """用独立随机流生成一个主候选，并测量选起点、扩散与真实评价的完整耗时。"""
+    device = getattr(generator, "device", None)
+    if device is None:
+        device = next(generator.parameters()).device
+    with proposal_rng(device, seed):
         started = perf_counter()
         final, rows, source = generator.generate(observation, random.Random(seed), settings["diffusion_steps"],
                                                 settings["perturbation_steps"], record)
         candidate, eligible = evaluator.assess(final, proposal_id) if final is not None else (None, False)
         finished = perf_counter()
         elapsed = finished - started
+    for row in rows:
+        if "edit_completed_at" in row:
+            row["prefix_seconds"] = row.pop("edit_completed_at") - started
     source_id = "NEW"
     if rows and rows[0].get("index", len(observation.ids)) < len(observation.ids):
         source_id = observation.ids[rows[0]["index"]]
@@ -134,6 +147,174 @@ def collect_proposal(generator, evaluator, observation, settings, seed, proposal
             "source_id": source_id, "seed": seed, "proposal_id": proposal_id, "finished_at": finished}
 
 
+def expected_edit_value(editor, measure_quality, cost_rate, counters):
+    """枚举下一步全部合法动作，用冻结的 Critic 估计继续编辑后的远期回报。"""
+    @lru_cache(maxsize=128)
+    def task_query(task):
+        """保持主生成器使用的条件和单状态数值布局。"""
+        return editor.task_embedding(task, editor.actor_encoder, editor.actor_task) if editor.use_task else None
+
+    @lru_cache(maxsize=1024)
+    @torch.no_grad()
+    def expected(tree, step, task):
+        """在当前公式精确加权下一步，STOP 使用真实终点质量。"""
+        check_budget()
+        started = perf_counter()
+        actions = editor.edit_kernel.edits(tree)
+        paths, positions, replacements_at, _ = editor._sampling_distributions(
+            tree, step, task_query(task), actions)
+        position_probs = positions.logits.double().softmax(dim=0).tolist()
+        decision_seconds = perf_counter() - started
+        if len(position_probs) != len(paths) + 1:
+            raise ValueError("one-step continuation requires a lower STOP action")
+        counters["policy_states"] += 1
+        counters["legal_transitions"] += len(actions) + 1
+        terminal_quality, terminal_seconds = measure_quality(editor.as_node(tree))
+        counters["terminal_evaluations"] += 1
+        successor_probs = defaultdict(float)
+        cost_terms = [decision_seconds, position_probs[-1] * terminal_seconds]
+        for index, position_prob in enumerate(position_probs[:-1]):
+            started = perf_counter()
+            choices, edits = replacements_at(index)
+            edit_probs = edits.logits.double().softmax(dim=0).tolist()
+            cost_terms.append(position_prob * (perf_counter() - started))
+            for action, edit_prob in zip(choices, edit_probs, strict=True):
+                started = perf_counter()
+                after = editor.edit_kernel.apply(tree, action)
+                edit_seconds = perf_counter() - started
+                probability = position_prob * edit_prob
+                successor_probs[after] += probability
+                cost_terms.append(probability * edit_seconds)
+        states = [(after, step, task) for after in successor_probs]
+        # 按块编码大量后继。Critic 的算分是训练开销，不向生成动作收费。
+        values = []
+        for offset in range(0, len(states), 256):
+            check_budget()
+            values.extend(editor.state_values(states[offset:offset + 256]).double().tolist())
+        return (position_probs[-1] * terminal_quality
+                + fsum(prob * value for prob, value in zip(successor_probs.values(), values, strict=True))
+                - cost_rate * fsum(cost_terms))
+
+    return expected
+
+
+def quality_change_rewards(proposal, editor, measure_quality, cost_rate):
+    """起点记初始质量，编辑只记质量差，STOP一次扣除整条轨迹成本。"""
+    trajectory = proposal["rows"]
+    candidate = proposal["candidate"]
+    final_quality = candidate.quality if candidate is not None else -1.0
+    total_cost = cost_rate * proposal["seconds"]
+    if len(trajectory) == 1:
+        # 新建失败时没有可编辑的公式，也没有 STOP 动作。
+        trajectory[0]["reward"] = final_quality - total_cost
+        return [0.0]
+
+    def quality(program):
+        """复用真实终点评分，其他已访问公式按同一 F/G 任务评价。"""
+        tree = editor.as_node(program)
+        if candidate is not None and tree.id == candidate.tree.id:
+            return final_quality
+        return measure_quality(tree)[0]
+
+    current = quality(trajectory[1]["tree"])
+    trajectory[0].update(reward=current, initial_quality=current)
+    offsets = [0.0]
+    preparation = proposal["preparation_seconds"]
+    previous = trajectory[0]["prefix_seconds"]
+    for row in trajectory[1:]:
+        # 网络仍预测终点质量减剩余成本，减去当前质量和已耗成本可换算为新回报。
+        offsets.append(current + cost_rate * (preparation + previous))
+        following = current if row["action"] is None else quality(row["after"])
+        change = following - current
+        row.update(quality_before=current, quality_after=following, quality_change=change,
+                   reward=-total_cost if row["action"] is None else change)
+        current, previous = following, row["prefix_seconds"]
+    return offsets
+
+
+def lower_targets(policy, proposals, config, contributions, evaluator, reference_seconds):
+    """为两种集合筛选训练入口计算同一套下层 PPO 目标。"""
+    eta = config["reward"]["eta"] if contributions is not None else 0.0
+    contributions = contributions or {}
+    settings = config["lower"]
+    learned_stop = settings.get("learned_stop", False)
+    quality_delta = settings.get("quality_delta_reward", False)
+    rows, feedback = [], []
+    choices = [(i, j, row) for i, proposal in enumerate(proposals) for j, row in enumerate(proposal["rows"])
+               if row["kind"] == "edit" and row["action"] is not None] if learned_stop else []
+    if learned_stop and (reference_seconds is None or not np.isfinite(reference_seconds) or reference_seconds <= 0):
+        raise ValueError("continuation requires a positive frozen reference_seconds")
+    cost_rate = config["reward"]["kappa"] / reference_seconds if learned_stop else 0.0
+    summary = {"states": len(choices), "policy_states": 0, "legal_transitions": 0,
+               "terminal_evaluations": 0, "wall_seconds": 0.0, "evaluator_calls": 0}
+    expected, measure_quality = None, None
+    if choices:
+        if evaluator is None:
+            raise ValueError("continuation requires a task evaluator")
+        started = perf_counter()
+        panels = {name: evaluator.panels[name] for name in ("fit", "search")}
+        branch_evaluator = SelectionEvaluator(evaluator.grammar, panels, evaluator.config)
+
+        @lru_cache(maxsize=1024)
+        def measure_quality(tree):
+            """实际编辑和假设停止共用同一份质量和首次评价用时。"""
+            check_budget()
+            begin = perf_counter()
+            quality = branch_evaluator.assess(tree, "continuation")[0].quality
+            return quality, perf_counter() - begin
+
+        expected = expected_edit_value(policy.editor, measure_quality, cost_rate, summary)
+    offsets = []
+    for proposal in proposals:
+        d = contributions.get(proposal["proposal_id"], {}).get("value", 0.0)
+        reward = proposal["base_reward"] + eta * d
+        trajectory = proposal["rows"]
+        if not trajectory:
+            raise ValueError("financial diffusion PPO requires recorded trajectories")
+        value_offsets = None
+        if quality_delta:
+            value_offsets = quality_change_rewards(proposal, policy.editor, measure_quality, cost_rate)
+        elif learned_stop:
+            previous = 0.0
+            for row in trajectory:
+                elapsed = row.get("prefix_seconds", previous)
+                row["reward"] = -cost_rate * (elapsed - previous)
+                previous = elapsed
+            # 旧版协议逐步计成本，STOP 后结算质量，Critic 只拟合基础回报。
+            preparation = proposal["preparation_seconds"]
+            quality = proposal["candidate"].quality if proposal["candidate"] is not None else -1.0
+            trajectory[0]["reward"] -= cost_rate * preparation
+            trajectory[-1]["reward"] += quality - cost_rate * (proposal["seconds"] - preparation - previous)
+        else:
+            for row in trajectory:
+                row["reward"] = 0.0
+            trajectory[-1]["reward"] = reward
+        complete_returns(trajectory)
+        gae_targets(trajectory, settings["gae_lambda"], value_offsets=value_offsets)
+        offsets.append(value_offsets)
+        if learned_stop:
+            for row in trajectory:
+                row["advantage"] += eta * d
+        rows.extend(trajectory)
+        feedback.append({"proposal_id": proposal["proposal_id"], "base_reward": proposal["base_reward"],
+                         "contribution": d, "reward": reward})
+
+    if expected is not None:
+        for i, j, row in choices:
+            value = expected(row["after"], row["step"], row["task"])
+            if not np.isfinite(value):
+                raise ValueError("continuation target must be finite")
+            baseline = row["value"]
+            if quality_delta:
+                # 下一状态的质量与已耗成本是各合法后继的共同偏移，无需逐个评价假设编辑。
+                value -= offsets[i][j + 1]
+                baseline -= offsets[i][j]
+            row["expected_future_value"] = value
+            row["advantage"] = row["reward"] + value - baseline + eta * feedback[i]["contribution"]
+        summary.update(wall_seconds=perf_counter() - started, evaluator_calls=branch_evaluator.calls)
+    return rows, feedback, eta, summary
+
+
 def initialize_worker(config):
     """在 CPU 采集进程初始化网络和有界的任务评价器缓存。"""
     global _config, _generator, _evaluators
@@ -142,7 +323,8 @@ def initialize_worker(config):
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
     grammar = Grammar(**config["grammar"])
-    _generator = GeneratorPolicy(grammar, config["width"], config["corpus"]["noise_steps"])
+    _generator = GeneratorPolicy(grammar, config["width"], config["corpus"]["noise_steps"],
+                                 learned_stop=config["lower"].get("learned_stop", False))
     _evaluators = {}
 
 
@@ -225,6 +407,7 @@ def build_candidate_pool(generator, evaluator, bank, config, rng, reference_seco
             batch = collector.collect(generator, evaluator, task, observation, seeds, identities, record)
         credited = []
         for proposal in batch:
+            proposal["preparation_seconds"] = preparation
             proposal["seconds"] += preparation
             candidate = proposal["candidate"]
             quality = candidate.quality if candidate is not None else -1.0
@@ -293,12 +476,14 @@ def forward_exchange(evaluator, candidates, maximum):
 
 
 def select_members(selector, observation, evaluator, candidates, *, segment="feedback", method="upper_ppo",
-                   rng=None, deterministic=False, trace_lambda=1.0):
+                   rng=None, deterministic=False, trace_lambda=1.0, contribution_ids=None):
     """从空集合开始选择成员/STOP，完整终点得分反馈整条上层轨迹。"""
     rng = rng or random.Random(0)
     rows, selected = [], []
+    # 排名对照仍取前十；选尽整池时排序次序不会改变等权组合。
+    maximum = min(observation.maximum, 10) if method == "quality" and observation.independent_stop else observation.maximum
     planned = forward_exchange(evaluator, candidates, observation.maximum) if method == "forward_exchange" else None
-    while len(selected) < observation.maximum:
+    while len(selected) < maximum:
         check_budget()
         state = replace(observation, selected=tuple(selected))
         if method in {"upper_ppo", "linucb", "double_dqn"}:
@@ -329,7 +514,7 @@ def select_members(selector, observation, evaluator, candidates, *, segment="fee
         if index in selected:
             raise AssertionError("selector repeated a member")
         selected.append(index)
-    score, contributions = evaluator.contributions(candidates, selected, segment)
+    score, contributions = evaluator.contributions(candidates, selected, segment, proposal_ids=contribution_ids)
     rows[-1]["reward"] = score["utility"]
     complete_returns(rows)
     if method == "upper_ppo":

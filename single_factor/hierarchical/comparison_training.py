@@ -60,6 +60,13 @@ class Study:
         current = load_selection_config(self.protocol_path.with_name("config.json"))
         if current["fingerprint"] != self.protocol["config"]["fingerprint"]:
             raise ValueError("protocol code/data/config identity changed; prepare a new protocol")
+        device = torch.device(current["device"])
+        if device.type == "cuda":
+            workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+            if workspace not in {":4096:8", ":16:8"}:
+                raise ValueError("deterministic CUDA requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
+            if not torch.cuda.is_available() or (device.index is not None and device.index >= torch.cuda.device_count()):
+                raise RuntimeError(f"CUDA device {device} is unavailable; check the training Python with comparison_cli doctor")
         self.config, self.profile = current, self.protocol["settings"]
         torch.set_num_threads(current["torch_threads"])
         self.output = Path(output).resolve()
@@ -185,6 +192,11 @@ class Study:
                 save_json(path / "failure.json", {"type": type(error).__name__, "message": str(error),
                                                    "traceback": traceback.format_exc()})
                 raise
+            finally:
+                # 每个节点的评价缓存独立。节点结束后释放旧缓存，避免跨阶段累积全市场信号。
+                scope = f"train_{name}_{seed}"
+                for key in [key for key in self.evaluators if key[-1] == scope]:
+                    del self.evaluators[key]
 
     def evaluate_node(self, name, seed, split=None, selection_identity=None):
         """按协议在训练R段或历史保留段比较，保存选股及配权结果。"""
@@ -226,7 +238,8 @@ class Study:
                     seed_all(seed_number(seed, task["name"], budget, sampling_seed, "selection"))
                     started = perf_counter()
                     _, selected, _, _ = select_members(selector, observation, evaluator, candidates,
-                        segment="validation", method=selector_method, rng=random.Random(sampling_seed), deterministic=True)
+                        segment="validation", method=selector_method, rng=random.Random(sampling_seed), deterministic=True,
+                        contribution_ids=())
                     selection_seconds = perf_counter() - started
                     # 此处开始使用独立验收标签，候选和成员已全部锁定。
                     final = self.evaluator(task, future=True, scope=f"final_{name}_{seed}_{budget}_{sampling_seed}") if split == "test" else evaluator
@@ -374,9 +387,11 @@ class NodeRunner:
             if feedback:
                 observation = self.evaluator(task).observation(pool.candidates, self.config["upper"]["max_members"])
                 _, _, _, contributions = select_members(self.selector, observation, self.evaluator(task), pool.candidates,
-                                                         method=self.method, trace_lambda=self.config["upper"]["gae_lambda"])
+                    method=self.method, trace_lambda=self.config["upper"]["gae_lambda"],
+                    contribution_ids={proposal["proposal_id"] for proposal in proposals})
             if isinstance(self.generator, DiffusionBackend):
-                metrics = self.generator.learn(proposals, random.Random(seed_number(self.seed, tag, "update")), contributions)
+                metrics = self.generator.learn(proposals, random.Random(seed_number(self.seed, tag, "update")),
+                    contributions, evaluator=self.evaluator(task), reference_seconds=self.reference)
             else:
                 metrics = {"samples": len(proposals), "optimizer_steps": 0, "update_type": "genetic_generation"}
             metrics["generation"] = report
@@ -402,8 +417,8 @@ class NodeRunner:
         scores = []
         for episode in range(self.config["upper"]["episodes_per_batch"]):
             seed_all(seed_number(self.seed, tag, episode))
-            rows, selected, score, contributions = select_members(self.selector, frozen["observation"], self.evaluator(task),
-                frozen["candidates"], method=self.method, trace_lambda=self.config["upper"]["gae_lambda"])
+            rows, _, score, _ = select_members(self.selector, frozen["observation"], self.evaluator(task),
+                frozen["candidates"], method=self.method, trace_lambda=self.config["upper"]["gae_lambda"], contribution_ids=())
             rollouts.append(rows)
             scores.append(score)
         metrics = self.selector.learn(rollouts, random.Random(seed_number(self.seed, tag, "update")))
@@ -411,7 +426,8 @@ class NodeRunner:
         self.state["history"].append({"stage": "upper", "tag": tag, "task": task["name"],
             "pool_id": frozen["observation"].pool_id, "generator_version": frozen["generator_version"],
             "mean_return": float(np.mean([rows[0]["return"] for rows in rollouts])),
-            "mean_ic": float(np.mean([score["ic"] for score in scores])), **metrics})
+            "mean_ic": float(np.mean([score["ic"] for score in scores])),
+            "mean_members": float(np.mean([len(score["members"]) for score in scores])), **metrics})
         if self.config["record_rollouts"] and self.state["selector_version"] % self.study.profile.get("rollout_every", 10) == 0:
             save_torch(self.root / "rollouts" / f"{tag}.pt", {"rows": rollouts, "task": task["name"], "metrics": metrics})
 

@@ -206,13 +206,15 @@ def main():
     prepare.add_argument("--profile", choices=("smoke", "short", "long", "primary"), default="short")
     prepare.add_argument("--device", default="auto")
     prepare.add_argument("--width", type=int, help="覆盖上下层网络隐藏宽度；原生RPN PPO仍使用独立的rpn_width")
+    prepare.add_argument("--candidate-capacity", type=int, help="候选池容量上限")
+    prepare.add_argument("--pool-attempts", type=int, help="每次建池的生成尝试数")
     prepare.add_argument("--tasks-config", help="explicit historical/test tasks for local smoke validation")
     prepare.add_argument("--training-start")
     prepare.add_argument("--end", help="information cutoff, defaults to the prepared panel end")
     panel = commands.add_parser("prepare-panel")
     panel.add_argument("--source", choices=("clickhouse", "master"), help="defaults to ClickHouse; --master preserves historical imports")
     panel.add_argument("--master")
-    panel.add_argument("--codes", default=str(TEMPLATES / "assets/codes.json"))
+    panel.add_argument("--codes", help="显式股票名单；公司库实时取数默认使用请求日期内的全部股票")
     panel.add_argument("--output", required=True)
     panel.add_argument("--training-start", default=TRAINING_START)
     panel.add_argument("--start", help="raw data start, defaults to 100 sessions before training")
@@ -263,7 +265,7 @@ def main():
         if source == "master":
             if not args.master or args.snapshot_id or args.snapshot_root or args.refresh:
                 parser.error("master source requires --master and accepts no snapshot options")
-            result = prepare_panel(args.master, args.codes, args.output,
+            result = prepare_panel(args.master, args.codes or TEMPLATES / "assets/codes.json", args.output,
                                    start=args.start or "2023-07-03", end=args.end or "2026-06-16")
         else:
             if args.master:
@@ -283,8 +285,10 @@ def main():
                         if not cache.is_absolute():
                             task[segment]["cache"] = str((task_config.parent / cache).resolve())
         overrides = {"training_start": args.training_start, "cutoff": args.end} if args.training_start or args.end else {}
-        if args.width is not None:
-            overrides["width"] = args.width
+        for name in ("width", "candidate_capacity", "pool_attempts"):
+            value = getattr(args, name)
+            if value is not None:
+                overrides[name] = value
         result = prepare_protocol(args.cache, args.output, args.profile, args.device, tasks, **overrides)
         result = {"protocol": str(Path(args.output).resolve() / "protocol.json"), "width": result["config"]["width"],
                   "dates": result["dates"]}

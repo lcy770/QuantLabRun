@@ -82,17 +82,18 @@ def resolve_nodes(names=None, groups=None):
 
 
 def prepare_protocol(cache, output, profile="short", device="auto", tasks=None, *, training_start=None, cutoff=None,
-                     width=None):
-    """生成冻结协议，可覆盖上下层网络宽度，原生自回归对照保留独立宽度。"""
-    if width is not None and (type(width) is not int or width < 1):
-        raise ValueError("width must be a positive integer")
+                     width=None, candidate_capacity=None, pool_attempts=None):
+    """生成冻结协议，记录模型宽度、候选池容量和生成预算。"""
     output = Path(output).resolve()
     if (output / "protocol.json").exists():
         raise FileExistsError("protocol already exists; use it unchanged or choose a new output")
     profiles = json.loads((TEMPLATES / "profiles.json").read_text(encoding="utf-8"))
     settings = profiles[profile]
-    if width is not None:
-        settings["width"] = width
+    for name, value in (("width", width), ("candidate_capacity", candidate_capacity), ("pool_attempts", pool_attempts)):
+        if value is not None:
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            settings[name] = value
     config = json.loads((TEMPLATES / "base.json").read_text(encoding="utf-8"))
     cache = Path(cache).resolve()
     if tasks is None:

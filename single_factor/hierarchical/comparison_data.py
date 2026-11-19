@@ -178,8 +178,13 @@ def prepare_panel(master, codes_file, output, *, start="2023-07-03", end="2026-0
 
 def read_codes(path):
     """读取固定股票池，拒绝空池、重复及无效证券代码。"""
+    return checked_codes(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def checked_codes(values):
+    """所有行情来源统一使用互不重复的六位股票代码。"""
     from repositories.local_store import normalize_code
-    codes = [normalize_code(str(code)) for code in json.loads(Path(path).read_text(encoding="utf-8"))]
+    codes = [normalize_code(code) for code in values]
     if not codes or len(set(codes)) != len(codes) or any(len(code) != 6 or not code.isdigit() for code in codes):
         raise ValueError("codes must be distinct six-digit stock identifiers")
     return codes
@@ -201,7 +206,8 @@ def prepare_database_panel(codes_file, output, *, training_start=TRAINING_START,
     from repositories import clickhouse, snapshot_store
     if Path(output).exists() and any(Path(output).iterdir()):
         raise FileExistsError("use an empty output directory for immutable panel preparation")
-    codes = read_codes(codes_file)
+    codes = read_codes(codes_file) if codes_file is not None else None
+    universe = "explicit_codes" if codes is not None else "all_database_stocks"
     if min(horizon, lookback) < 1:
         raise ValueError("positive horizon and lookback are required")
     required_start = warmup_start(training_start, lookback)
@@ -214,7 +220,9 @@ def prepare_database_panel(codes_file, output, *, training_start=TRAINING_START,
             raise ValueError("choose an existing snapshot or refresh from the database")
         snapshot = snapshot_store.snapshot_manifest(snapshot_id, snapshot_root=snapshot_root)
         end = str(pd.Timestamp(end or snapshot["date_max"]).date())
-        if set(codes) != set(snapshot["codes"]):
+        if codes is None:
+            codes, universe = checked_codes(snapshot["codes"]), "snapshot_codes"
+        elif set(codes) != set(snapshot["codes"]):
             raise ValueError("snapshot stock universe differs from experiment codes")
         if start < snapshot["date_min"] or end > snapshot["date_max"]:
             raise ValueError("snapshot does not cover the requested experiment interval")
@@ -225,7 +233,8 @@ def prepare_database_panel(codes_file, output, *, training_start=TRAINING_START,
             raise ValueError(f"latest completed trading day is {ceiling}")
         settings = clickhouse.resolve_settings()
         before = str((pd.Timestamp(requested_end) + pd.Timedelta(days=1)).date())
-        rows = clickhouse.ClickHouseHTTPClient(settings).query(
+        client = clickhouse.ClickHouseHTTPClient(settings)
+        rows = client.query(
             f"SELECT toString(max(toDate(timestamps))) AS date_max FROM {clickhouse.DAILY_TABLE} "
             f"WHERE category = 'stock' AND timestamps < '{before}'")
         available = rows[0].get("date_max") if rows else None
@@ -234,14 +243,23 @@ def prepare_database_panel(codes_file, output, *, training_start=TRAINING_START,
         if end and str(pd.Timestamp(available).date()) < requested_end:
             raise ValueError(f"database data ends at {available}, before requested {requested_end}")
         end = str(pd.Timestamp(available).date())
+        if codes is None:
+            before = str((pd.Timestamp(end) + pd.Timedelta(days=1)).date())
+            stocks = client.query(
+                f"SELECT DISTINCT toString(code) AS code FROM {clickhouse.DAILY_TABLE} "
+                f"WHERE category = 'stock' AND timestamps >= '{start}' AND timestamps < '{before}' ORDER BY code")
+            if not stocks:
+                raise ValueError("database has no stocks in the requested panel period")
+            codes = sorted(checked_codes(row["code"] for row in stocks))
         snapshot = snapshot_store.create_or_reuse_snapshot(codes, fields, start, end,
-            pool_id=digest(codes), snapshot_root=snapshot_root, as_of=end, refresh=refresh)
+            pool_id=digest(codes), snapshot_root=snapshot_root, as_of=end, refresh=refresh, category="stock")
     if end > latest_completed_session():
         raise ValueError("snapshot includes an unfinished or future trading day")
     frame = snapshot_store.load_snapshot(snapshot["snapshot_id"], columns=["date", "code", *fields],
                                          snapshot_root=snapshot_root)
     frame = frame[(frame.date >= pd.Timestamp(start)) & (frame.date <= pd.Timestamp(end))]
-    source = {"data_source": "clickhouse_snapshot", "source_snapshot_id": snapshot["snapshot_id"],
+    source = {"data_source": "clickhouse_snapshot", "stock_universe": universe,
+              "source_snapshot_id": snapshot["snapshot_id"],
               "source_fingerprint": file_hash(snapshot_store.snapshot_path(snapshot["snapshot_id"], snapshot_root=snapshot_root)),
               "source_snapshot": snapshot, "experiment_training_start": training_start,
               "data_conventions_verified": False}

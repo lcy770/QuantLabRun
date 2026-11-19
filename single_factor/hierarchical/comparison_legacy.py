@@ -47,7 +47,8 @@ def run_legacy(study, name, seed):
             time_budget_seconds=study.profile["upper_seconds"])
         for layer in ("lower", "upper"):
             config[layer]["ppo"]["epochs"] = study.profile["ppo_epochs"]
-        config["search"].update(pool_capacity=study.profile["max_members"], shortlist_size=study.config["lower"]["shortlist_size"],
+        config["search"].update(pool_capacity=study.profile.get("legacy_max_members", study.profile["max_members"]) or 10,
+            shortlist_size=study.config["lower"]["shortlist_size"],
             max_attempts=study.profile["batch_formulas"], budget_mode="attempts", seconds=study.profile["time_budget"],
             quality_threshold=study.config["reward"]["thresholds"][0], min_coverage=study.config["reward"]["thresholds"][3],
             min_search_rank_ic=study.config["reward"]["thresholds"][1])

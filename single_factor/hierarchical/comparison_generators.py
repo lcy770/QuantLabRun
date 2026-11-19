@@ -11,9 +11,10 @@ import torch
 
 from .ast import Node
 from .models import LowerTask
-from .ppo import complete_returns, gae_targets, update
+from .ppo import update
 from .rpn import RPNKernel, TokenEdit
 from .selection_models import GeneratorPolicy
+from .selection_search import lower_targets
 
 
 class DiffusionBackend:
@@ -25,7 +26,8 @@ class DiffusionBackend:
         """创建实际生成策略和金融、结构两个优化器。"""
         self.grammar, self.config = grammar, config
         self.device = torch.device(config["device"])
-        self.policy = GeneratorPolicy(grammar, config["width"], config["corpus"]["noise_steps"]).to(self.device)
+        self.policy = GeneratorPolicy(grammar, config["width"], config["corpus"]["noise_steps"],
+                                      learned_stop=config["lower"].get("learned_stop", False)).to(self.device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=config["lower"]["learning_rate"])
         self.syntax_optimizer = torch.optim.Adam(self.policy.editor.parameters(), lr=config["pretrain"]["learning_rate"])
         self.pretrained_only = pretrained_only
@@ -38,7 +40,8 @@ class DiffusionBackend:
         source = observation.trees[index] if index < len(observation.trees) else self.grammar.sample(rng)
         self.last_source_id = source.id if index < len(observation.trees) else "NEW"
         noisy, _ = self.policy.editor.corrupt(source, perturbation_steps, rng)
-        final, rows = self.policy.editor.sample(noisy, remaining=steps, record=record, task=LowerTask(source, (), (), 0.0))
+        final, rows = self.policy.editor.sample(noisy, remaining=steps, record=record,
+                                               task=LowerTask(source, (), (), 0.0), allow_stop=False)
         return final, rows, source
 
     def pretrain(self, records, rng):
@@ -61,27 +64,13 @@ class DiffusionBackend:
         return {"train_nll": float(np.mean(losses)),
                 "check_nll": syntax_loss(self.policy.editor, [r for r in records if r["split"] == "check"])}
 
-    def learn(self, proposals, rng, contributions=None):
-        """将 Q、真实成本及可选局部 D 反馈到起点与所有去噪动作。"""
-        eta = self.config["reward"]["eta"] if contributions is not None else 0.0
-        contributions = contributions or {}
-        rows, feedback = [], []
-        for proposal in proposals:
-            d = contributions.get(proposal["proposal_id"], {}).get("value", 0.0)
-            reward = proposal["base_reward"] + eta * d
-            trajectory = proposal["rows"]
-            if not trajectory:
-                raise ValueError("financial diffusion PPO requires recorded trajectories")
-            for row in trajectory:
-                row["reward"] = 0.0
-            trajectory[-1]["reward"] = reward
-            complete_returns(trajectory)
-            gae_targets(trajectory, self.config["lower"]["gae_lambda"])
-            rows.extend(trajectory)
-            feedback.append({"proposal_id": proposal["proposal_id"], "base_reward": proposal["base_reward"],
-                             "contribution": d, "reward": reward})
+    def learn(self, proposals, rng, contributions=None, *, evaluator=None, reference_seconds=None):
+        """冻结策略完成主轨迹与续采样的信用分配，再执行下层 PPO 更新。"""
+        rows, feedback, eta, continuation = lower_targets(
+            self.policy, proposals, self.config, contributions, evaluator, reference_seconds)
         result = update(self.policy, self.optimizer, rows, rng=rng, **self.config["lower"]["ppo"])
-        return {**result, "feedback": feedback, "update_type": "ppo", "eta_effective": eta}
+        return {**result, "feedback": feedback, "update_type": "ppo", "eta_effective": eta,
+                "edit_continuations": continuation}
 
     def checkpoint(self):
         """保存权重及两类优化器状态。"""

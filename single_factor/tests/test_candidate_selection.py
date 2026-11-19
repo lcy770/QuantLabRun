@@ -16,7 +16,7 @@ from single_factor.hierarchical.ast import Grammar
 from single_factor.hierarchical.evaluation import Slice, normalize
 from single_factor.hierarchical.selection_evaluation import (
     SelectionEvaluator, block_deviation, daily_correlation, load_selection_task,
-    member_deficiency, quality_score,
+    member_deficiency, pairwise_day_correlation, quality_score,
 )
 from single_factor.hierarchical.selection_models import GeneratorPolicy, SelectorPolicy
 from single_factor.hierarchical.selection_search import (
@@ -267,6 +267,61 @@ def test_selector_mask_permutation_empty_stop_and_nonzero_gradients(tmp_path):
     assert len(trajectory) == 1 and indices == () and score["utility"] == 0
     full, _ = selector.distribution(replace(observation, selected=(0, 1)))
     assert full.probs[-1] == 1
+
+
+def test_uncapped_selector_can_choose_more_than_ten_then_stop(tmp_path, monkeypatch):
+    """使用真实选择策略核验大池STOP概率、超过十个成员、主动停止及选尽。"""
+    from single_factor.hierarchical.__main__ import load_config
+
+    config = load_config(config_file(tmp_path))
+    evaluator = SelectionEvaluator(grammar(), load_selection_task(config["tasks"][0], config, with_feedback=True), config)
+    source = evaluator.assess(grammar().parse("volume"), "volume")[0]
+    candidates = [replace(source, proposal_id=str(i)) for i in range(16)]
+    selector = SelectorPolicy(grammar(), 8)
+    with torch.no_grad():
+        selector.stop_head[-1].weight.zero_()
+        selector.stop_head[-1].bias.fill_(-2)
+    observation = evaluator.observation(candidates, None)
+    small = evaluator.observation(candidates[:3], None)
+    expected_stop = torch.sigmoid(torch.tensor(-2.)).item()
+    for state in (small, observation, replace(observation, selected=tuple(range(6)))):
+        distribution, _ = selector.distribution(state)
+        assert distribution.probs[-1].item() == pytest.approx(expected_stop, abs=1e-7)
+        assert all(distribution.probs[i].item() == 0 for i in state.selected)
+    assert selector.sample(observation, deterministic=True)["index"] < len(candidates)
+    sample = selector.sample
+
+    def choose(state, deterministic):
+        with torch.no_grad():
+            selector.stop_head[-1].bias.fill_(20 if len(state.selected) >= 11 else -20)
+        return sample(state, deterministic)
+
+    monkeypatch.setattr(selector, "sample", choose)
+    rows, selected, _, _ = select_members(selector, observation, evaluator, candidates, deterministic=True,
+                                           contribution_ids=())
+    assert len(selected) == 11 and len(set(selected)) == 11
+    assert rows[-1]["index"] == len(candidates)
+    exhausted, _ = selector.distribution(replace(observation, selected=tuple(range(len(candidates)))))
+    assert exhausted.probs[-1].item() == 1.0
+    _, ranked, _, _ = select_members(None, observation, evaluator, candidates, method="quality", contribution_ids=())
+    assert len(ranked) == 10
+
+
+def test_batch_pair_correlation_matches_scalar_with_mixed_coverage():
+    """大池相关性仍按各因子对的共同有效股票计算，覆盖低方差及不同缺失位置。"""
+    rng = np.random.default_rng(17)
+    values = rng.normal(size=(24, 150))
+    values[rng.random(values.shape) < 0.15] = np.nan
+    values[0] = 3
+    values[1] = 1e13 + rng.normal(size=150)
+    values[2] = rng.normal(size=150) * 1e120
+    values[2, :125] = np.nan
+    values[3, 0] = 1e120
+    values[4, 0] = np.nan
+    indices = np.tril_indices(len(values), -1)
+    actual = pairwise_day_correlation(values)[indices]
+    expected = [daily_correlation(values[i:i+1], values[j:j+1])[0] for i, j in zip(*indices)]
+    np.testing.assert_allclose(actual, expected, atol=2e-9, equal_nan=True)
 
 
 @pytest.mark.parametrize("workers", [1, 2])

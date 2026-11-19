@@ -112,7 +112,7 @@ def _request_lock(root: Path, key: str):
 
 
 def create_or_reuse_snapshot(codes, fields, start_date, end_date, *, pool_id,
-                             snapshot_root=None, as_of=None, refresh=False) -> dict:
+                             snapshot_root=None, as_of=None, refresh=False, category=None) -> dict:
     codes = sorted({normalize_code(str(code)) for code in codes})
     fields = sorted(set(fields))
     start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
@@ -136,6 +136,8 @@ def create_or_reuse_snapshot(codes, fields, start_date, end_date, *, pool_id,
                    start_date=str(start.date()), end_date=str(end.date()), as_of=as_of,
                    source_signature=company_source.source_signature(), source_identity=source_identity,
                    query_version=query_version, snapshot_version=SNAPSHOT_VERSION)
+    if category is not None:
+        request["category"] = category
     key = _hash(request)
     root = _root(snapshot_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -155,7 +157,8 @@ def create_or_reuse_snapshot(codes, fields, start_date, end_date, *, pool_id,
         temporary.mkdir()
         try:
             panel_path = temporary / "panel.parquet"
-            company_source.write_pool_panel(codes, fields, panel_path, request["start_date"], request["end_date"])
+            company_source.write_pool_panel(codes, fields, panel_path, request["start_date"], request["end_date"],
+                                            category=category)
             schema = pq.read_schema(panel_path)
             missing = {"date", "code", *fields} - set(schema.names)
             if missing:

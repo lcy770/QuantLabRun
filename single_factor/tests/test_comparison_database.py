@@ -37,26 +37,34 @@ def test_latest_session_waits_for_close():
     assert comparison_data.latest_completed_session("2027-01-04 17:00") == "2026-12-31"
 
 
-@pytest.mark.parametrize("missing_day", [False, True])
-def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day):
+@pytest.mark.parametrize("missing_day,all_stocks", [(False, False), (True, False), (False, True)])
+def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day, all_stocks):
     """通过真实CLI、上游快照及面板发布链路，验证标签和缺日失败行为。"""
     import sys
-    codes = ["000001", "000002", "000004", "000005", "000006"]
+    codes = [f"{i:06d}" for i in range(1, 502)] if all_stocks else ["000001", "000002", "000004", "000005", "000006"]
     codes_path = tmp_path / "codes.json"
     save_json(codes_path, codes)
     queries, captures = [], []
 
     def query(client, sql):
-        """模拟最新日期查询，实际测试不连接公司数据库。"""
+        """模拟最新日期和不设名单上限的全市场代码查询。"""
         queries.append(sql)
+        if "SELECT DISTINCT" in sql:
+            assert all_stocks and "LIMIT" not in sql
+            assert "category = 'stock'" in sql and "timestamps >= '2025-01-27'" in sql
+            assert "timestamps < '2026-11-17'" in sql
+            return [{"code": code} for code in reversed(codes)]
         return [{"date_max": "2026-11-16"}]
 
-    def capture(stock_codes, fields, output, start, end):
+    def capture(stock_codes, fields, output, start, end, *, category):
         """输出覆盖交易日的合成源快照，缺日分支用于验证拒绝不完整数据。"""
         dates = calendars.get_calendar("XSHG", start=start, end=end).sessions.tz_localize(None)
         if missing_day:
             dates = dates.delete(110)
         captures.append((start, end))
+        assert category == "stock" and list(stock_codes) == codes
+        panel_sql = company_source.build_panel_sql(stock_codes, fields, start, end, category=category)
+        assert "d.category = 'stock'" in panel_sql and "d.timestamps < addDays(toDate('2026-11-16'), 1)" in panel_sql
         index = pd.MultiIndex.from_product([dates, stock_codes], names=["date", "code"])
         frame = index.to_frame(index=False)
         t = np.repeat(np.arange(len(dates)), len(stock_codes))
@@ -64,6 +72,9 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day):
         for field in fields:
             frame[field] = 100.0 + t + offset if field in {"open", "close", "high", "low"} else 1.0
         frame["ycp"] = 99.0 + t + offset
+        if all_stocks:
+            # 第501只股票中途上市。全市场模式保留它，上市前价格和标签为缺失值。
+            frame = frame[(frame["code"] != codes[-1]) | (frame["date"] >= dates[6])]
         frame.to_parquet(output, index=False)
 
     monkeypatch.setattr(clickhouse, "resolve_settings", lambda: clickhouse.LiveDBSettings(password="test"))
@@ -71,8 +82,10 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day):
     monkeypatch.setattr(company_source, "write_pool_panel", capture)
     monkeypatch.setattr(comparison_data, "latest_completed_session", lambda: "2026-11-16")
     output, root = tmp_path / "panel", tmp_path / "snapshots"
-    monkeypatch.setattr(sys, "argv", ["comparison_cli", "prepare-panel", "--codes", str(codes_path),
-        "--output", str(output), "--snapshot-root", str(root)])
+    argv = ["comparison_cli", "prepare-panel", "--output", str(output), "--snapshot-root", str(root)]
+    if not all_stocks:
+        argv += ["--codes", str(codes_path)]
+    monkeypatch.setattr(sys, "argv", argv)
     if missing_day:
         with pytest.raises(ValueError, match="missing whole-market sessions"):
             comparison_cli.main()
@@ -84,14 +97,22 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day):
     assert manifest["date_end"] == "2026-11-16"
     assert manifest["experiment_training_start"] == "2025-07-01"
     assert manifest["source_snapshot"]["as_of_kind"] == "capture-label"
+    assert manifest["source_snapshot"]["category"] == "stock"
+    assert manifest["stock_universe"] == ("all_database_stocks" if all_stocks else "explicit_codes")
+    assert manifest["n_stocks"] == len(codes)
     assert "password" not in json.dumps(manifest).lower()
     dates = np.load(output / "dates.npy")
     labels = np.load(output / manifest["label_file"])
-    assert np.isfinite(labels[:-20]).all()
+    assert np.isfinite(labels[:-20, :-1]).all()
+    if all_stocks:
+        assert np.isnan(labels[:6, -1]).all()
+        assert np.isnan(np.load(output / "close.npy")[:6, -1]).all()
+        assert np.isfinite(labels[6:-20, -1]).all()
     assert np.isnan(labels[-20:]).all()
     assert labels[0, 0] == pytest.approx(120 / 100 - 1)
     assert np.searchsorted(dates, np.datetime64("2025-07-01")) == 100
-    assert len(queries) == len(captures) == 1
+    assert len(queries) == (2 if all_stocks else 1)
+    assert len(captures) == 1
 
     def offline():
         """离线复用时，配置和查询均不应再次触发。"""
@@ -99,8 +120,9 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day):
 
     monkeypatch.setattr(clickhouse, "resolve_settings", offline)
     copy = tmp_path / "offline"
-    comparison_data.prepare_database_panel(codes_path, copy, snapshot_id=manifest["source_snapshot_id"], snapshot_root=root)
-    assert np.array_equal(np.load(copy / "close.npy"), np.load(output / "close.npy"))
+    source_codes = None if all_stocks else codes_path
+    comparison_data.prepare_database_panel(source_codes, copy, snapshot_id=manifest["source_snapshot_id"], snapshot_root=root)
+    assert np.array_equal(np.load(copy / "close.npy"), np.load(output / "close.npy"), equal_nan=True)
     tasks, _ = comparison_data.design_tasks(copy)
     comparison_data.validate_cache(copy, tasks, 100, 20, comparison_data.FIELDS)
     from single_factor.hierarchical.comparison_study import prepare_protocol

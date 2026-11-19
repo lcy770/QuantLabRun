@@ -57,6 +57,24 @@ def protocol(tmp_path):
     return protocol_path
 
 
+def test_explicit_cuda_protocol_fails_early_when_training_python_lacks_cuda(protocol, tmp_path, monkeypatch):
+    """离线准备允许写 CUDA 协议，真正启动时必须核验训练解释器。"""
+    config_path = protocol.with_name("config.json")
+    config = json.loads(config_path.read_text())
+    config["device"] = "cuda:0"
+    save_json(config_path, config)
+    definition = json.loads(protocol.read_text())
+    definition["config"] = load_selection_config(config_path)
+    definition["fingerprint"] = digest({key: value for key, value in definition.items() if key != "fingerprint"})
+    save_json(protocol, definition)
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    output = tmp_path / "no_cuda"
+    with pytest.raises(RuntimeError, match="CUDA device cuda:0 is unavailable"):
+        Study(protocol, output)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("entry_point", ["comparison", "selection", "legacy"])
 def test_resume_normalizes_cuda_rng_states_to_cpu(protocol, tmp_path, monkeypatch, entry_point):
     """模拟检查点映射到GPU后，三个恢复入口均先还原CPU随机状态张量。"""
@@ -333,11 +351,12 @@ def test_prepare_cli_resolves_relative_task_caches(tmp_path, monkeypatch, width)
     argv = ["comparison_cli", "prepare", "--cache", str(tmp_path / "data"),
             "--output", str(tmp_path / "protocol"), "--tasks-config", str(config)]
     if width is not None:
-        argv += ["--width", str(width)]
+        argv += ["--width", str(width), "--candidate-capacity", "1024", "--pool-attempts", "4096"]
     monkeypatch.setattr(sys, "argv", argv)
     comparison_cli.main()
     assert captured["tasks"][0]["fit"]["cache"] == str((tmp_path / "data").resolve())
-    assert captured["overrides"] == ({"width": width} if width is not None else {})
+    assert captured["overrides"] == ({"width": width, "candidate_capacity": 1024, "pool_attempts": 4096}
+                                      if width is not None else {})
 
 
 @pytest.mark.parametrize("width", [None, 128, 256])
@@ -365,6 +384,9 @@ def test_prepare_protocol_freezes_model_width(protocol, tmp_path, monkeypatch, w
         assert result["settings"]["lower_seconds"] == 48 * 3600
         assert result["settings"]["upper_seconds"] == 24 * 3600
         assert result["settings"]["continuation_seconds"] == 48 * 3600
+        assert result["config"]["search"]["candidate_capacity"] == 512
+        assert result["config"]["upper"]["pool_attempts"] == 2048
+        assert result["config"]["upper"]["max_members"] is None
     study = Study(root / "protocol.json", tmp_path / "prepared_results")
     generator = create_generator("diffusion_ppo", study.grammar, study.config)
     selector = create_selector("upper_ppo", study.grammar, study.config)
@@ -451,23 +473,149 @@ def test_lower_D_uses_explicit_stage_weight(protocol, monkeypatch, contribution)
     assert metrics["eta_effective"] == (0.0 if contribution is None else 1.0)
 
 
-def test_joint_training_enables_D_only_after_independent_lower(protocol, tmp_path):
-    """通过真实训练入口确认独立阶段和交替阶段的有效D权重分别为0和1。"""
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="需要CUDA设备"))])
+def test_lower_continuations_and_joint_D_reach_ppo(protocol, tmp_path, monkeypatch, device):
+    """通过真实训练入口核对后续期望、PPO 目标及辅助分支隔离。"""
+    from torch.distributions import Categorical
+    from single_factor.hierarchical.models import LowerPolicy
+
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     config_path = protocol.with_name("config.json")
     config = json.loads(config_path.read_text())
+    config["device"] = device
     config["reward"]["eta"] = 1.0
+    config["lower"]["learned_stop"] = True
+    config["lower"]["quality_delta_reward"] = True
+    config["upper"]["max_members"] = None
     save_json(config_path, config)
     definition = json.loads(protocol.read_text())
     definition["config"] = load_selection_config(config_path)
+    definition["settings"]["rollout_every"] = 1
     definition["fingerprint"] = digest({key: value for key, value in definition.items() if key != "fingerprint"})
     save_json(protocol, definition)
+
+    sample = LowerPolicy.sample
+
+    def edit_then_stop(editor, tree, remaining=None, record=True, task=None, **kwargs):
+        # 每轮测试同时覆盖继续编辑与STOP，保留真实分布和重放记录。
+        if editor.stop_head is not None and record:
+            draws = iter((False, False, True))
+            with monkeypatch.context() as patch:
+                patch.setattr(Categorical, "sample", lambda dist: dist.logits.new_tensor(
+                    len(dist.logits) - 1 if next(draws) else 0, dtype=torch.long))
+                return sample(editor, tree, remaining, record, task, **kwargs)
+        return sample(editor, tree, remaining, record, task, **kwargs)
+
+    monkeypatch.setattr(LowerPolicy, "sample", edit_then_stop)
+
     output = tmp_path / "eta_stages"
     run_study(protocol, output, [0], nodes=["c_alternating"], train_only=True)
     study = Study(protocol, output)
     independent = study.saved_node("g_diffusion", 0)["state"]["history"]
     joint = study.saved_node("c_alternating", 0)["state"]["history"]
+    kappa = study.config["reward"]["kappa"]
+    cost_rate = kappa / study.reference_seconds(0)
     assert [row["eta_effective"] for row in independent if row["stage"] == "lower"] == [0.0]
     assert [row["eta_effective"] for row in joint if row["stage"] == "lower"] == [1.0]
+    for node, history in (("g_diffusion", independent), ("c_alternating", joint)):
+        metrics, = [row for row in history if row["stage"] == "lower"]
+        counts = metrics["edit_continuations"]
+        assert counts["states"] > 0
+        assert counts["legal_transitions"] > counts["policy_states"] > 0
+        assert counts["terminal_evaluations"] == counts["policy_states"]
+        assert metrics["generation"]["attempts"] == len(metrics["feedback"]) == config["lower"]["batch_formulas"]
+        assert metrics["optimizer_steps"] > 0
+        saved = torch.load(study.node_path(node, 0) / "rollouts" / f"{metrics['tag']}.pt",
+                           map_location="cpu", weights_only=False)
+        observed = 0
+        for proposal in saved["proposals"]:
+            trajectory = proposal["rows"]
+            d = (saved["contributions"] or {}).get(proposal["proposal_id"], {}).get("value", 0.0)
+            assert trajectory[0]["return"] == pytest.approx(proposal["base_reward"])
+            assert trajectory[0]["reward"] == trajectory[0]["initial_quality"]
+            assert trajectory[-1]["action"] is None
+            assert trajectory[-1]["reward"] == pytest.approx(-kappa * proposal["cost"])
+            for j, row in enumerate(trajectory):
+                offset = 0.0 if j == 0 else row["quality_before"] + cost_rate * (
+                    proposal["preparation_seconds"] + trajectory[j - 1]["prefix_seconds"])
+                assert row["value_target"] == pytest.approx(row["return"] + offset)
+                if row["kind"] == "edit" and row["action"] is not None:
+                    observed += 1
+                    assert row["reward"] == pytest.approx(row["quality_after"] - row["quality_before"])
+                    expected = row["reward"] + row["expected_future_value"]
+                else:
+                    assert "expected_future_value" not in row
+                    expected = row["return"]
+                assert row["advantage"] == pytest.approx(expected - (row["value"] - offset) + metrics["eta_effective"] * d)
+        assert observed == counts["states"]
+
+
+def test_expected_edit_value_weights_stop_and_all_next_actions(monkeypatch):
+    """用可手算的分布验证STOP真分、所有继续动作的Critic及耗时扣分。"""
+    from types import SimpleNamespace
+    from torch.distributions import Categorical
+    from single_factor.hierarchical import selection_search
+
+    def distributions(tree, step, query, actions):
+        return [0], Categorical(probs=torch.tensor([.8, .2], dtype=torch.float64)), (
+            lambda _: (actions, Categorical(probs=torch.tensor([.375, .625], dtype=torch.float64)))), actions
+
+    kernel = SimpleNamespace(edits=lambda tree: {"A": ("B", "A")}[tree],
+                             apply=lambda tree, action: action)
+    values = {"A": .4, "B": .7}
+    editor = SimpleNamespace(edit_kernel=kernel, use_task=False, as_node=lambda tree: tree,
+                             _sampling_distributions=distributions,
+                             state_values=lambda states: torch.tensor([values[tree] for tree, _, _ in states]))
+    clock = iter(range(200))
+    monkeypatch.setattr(selection_search, "perf_counter", lambda: next(clock))
+    counts = dict(policy_states=0, legal_transitions=0, terminal_evaluations=0)
+    expected = selection_search.expected_edit_value(editor, lambda _: (.1, 1.0), .1, counts)
+    assert expected("A", 1, None) == pytest.approx(.15)
+    assert counts == dict(policy_states=1, legal_transitions=3, terminal_evaluations=1)
+
+
+def test_edit_reward_is_quality_change_and_cost_is_charged_only_at_stop():
+    """提高、保持、退化分别得到正、零、负奖励，总成本只在STOP扣除。"""
+    from types import SimpleNamespace
+    from single_factor.hierarchical.selection_search import quality_change_rewards
+
+    start, better, final = map(grammar().parse, ("close", "volume", "amount"))
+    rows = [{"prefix_seconds": 1.0}]
+    for i, (before, after) in enumerate(((start, better), (better, better), (better, final)), 2):
+        rows.append({"tree": before, "after": after, "action": "edit", "prefix_seconds": float(i)})
+    rows.append({"tree": final, "after": final, "action": None, "prefix_seconds": 5.0})
+    proposal = {"rows": rows, "candidate": SimpleNamespace(tree=final, quality=.4),
+                "seconds": 7.0, "preparation_seconds": .5}
+    quality = {start: .2, better: .5}
+    editor = SimpleNamespace(as_node=lambda tree: tree)
+    offsets = quality_change_rewards(proposal, editor, lambda tree: (quality[tree], 0.), .05)
+    assert [row["reward"] for row in rows] == pytest.approx([.2, .3, 0, -.1, -.35])
+    assert sum(row["reward"] for row in rows) == pytest.approx(.4 - .35)
+    assert offsets == pytest.approx([0, .275, .625, .675, .625])
+
+
+def test_lower_stop_returns_current_formula_and_replays_probability(monkeypatch):
+    """走过原定步数后仍可继续编辑，仅STOP结束且可以参与PPO求导。"""
+    from torch.distributions import Categorical
+    from single_factor.hierarchical.selection_models import GeneratorPolicy
+
+    g = grammar()
+    editor = GeneratorPolicy(g, 8, 2, learned_stop=True).editor
+    start = g.parse("close")
+    # 五次位置及替换选择，最后在第六次位置分布中选择 STOP。
+    draws = iter([False] * 10 + [True])
+    monkeypatch.setattr(Categorical, "sample", lambda dist: dist.logits.new_tensor(
+        len(dist.logits) - 1 if next(draws) else 0, dtype=torch.long))
+    final, rows = editor.sample(start)
+    assert len(rows) == 6 and all(row["action"] is not None for row in rows[:-1])
+    row = rows[-1]
+    assert row["action"] is None and row["tree"] == row["after"]
+    assert final == editor.as_node(row["tree"])
+    assert float(editor.replay_logp(row).detach()) == pytest.approx(row["logp"], abs=1e-7)
+    logp, _, _ = editor.rows([row])[0]
+    (-logp).backward()
+    assert abs(editor.stop_head.bias.grad.item()) > .01
 
 
 def test_extend_preserves_learning_state_and_supports_multiple_rounds(protocol, tmp_path, monkeypatch):

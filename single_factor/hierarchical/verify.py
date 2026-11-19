@@ -155,7 +155,8 @@ def check_selection(config):
     ic_error = abs(score["ic"] - float(np.mean(daily)))
     if ic_error > 1e-9:
         raise AssertionError(f"equal-weight IC differs from numpy: {ic_error}")
-    generator = GeneratorPolicy(grammar, config["width"], config["corpus"]["noise_steps"])
+    generator = GeneratorPolicy(grammar, config["width"], config["corpus"]["noise_steps"],
+                                learned_stop=config["lower"].get("learned_stop", False))
     source = StartBank([candidate.tree for candidate in candidates]).observe(evaluator, config["lower"]["shortlist_size"])
     torch.manual_seed(41)
     final, rows, _ = generator.generate(source, random.Random(41), config["lower"]["diffusion_steps"],

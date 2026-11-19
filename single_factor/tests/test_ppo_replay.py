@@ -1,4 +1,5 @@
 """概率重放的批次数值漂移、真实错配拒绝及宽网络GPU回归。"""
+from dataclasses import replace
 import json
 from pathlib import Path
 import random
@@ -72,6 +73,34 @@ def test_real_or_large_replay_mismatches_fail_before_optimization(failure):
     assert not optimizer.state
 
 
+@pytest.mark.parametrize("corrupt_tail", [False, True])
+def test_large_rollout_replays_in_minibatches_before_any_update(monkeypatch, corrupt_tail):
+    """长轨迹的重放显存受小批限制，末批损坏仍在任何参数更新之前拦截。"""
+    model = LayoutPolicy()
+    rows = [dict(row) for _ in range(20) for row in rollout(model)]
+    if corrupt_tail:
+        rows[-1]["logp"] += .01
+    optimizer = torch.optim.Adam(model.parameters(), lr=.01)
+    replay = model.rows
+    check_sizes = []
+
+    def bounded(batch):
+        assert len(batch) <= 16
+        if not torch.is_grad_enabled():
+            check_sizes.append(len(batch))
+            assert not optimizer.state
+        return replay(batch)
+
+    monkeypatch.setattr(model, "rows", bounded)
+    if corrupt_tail:
+        with pytest.raises(AssertionError, match="old-policy.*row=39"):
+            update(model, optimizer, rows, epochs=1, batch_size=16)
+        assert not optimizer.state
+    else:
+        assert update(model, optimizer, rows, epochs=1, batch_size=16)["optimizer_steps"] == 3
+    assert check_sizes == [16, 16, 8]
+
+
 def tiny_grammar():
     return Grammar(["close", "volume"], operators=["sub", "div", "delay"], windows=[1, 5],
                    constants=[1., 2.], max_nodes=9)
@@ -120,7 +149,7 @@ def test_cuda_width256_replay_after_repeated_updates(monkeypatch):
     torch.manual_seed(19)
     path = Path(__file__).parents[2] / "experiments/dual_ppo/base.json"
     grammar = Grammar(**json.loads(path.read_text(encoding="utf-8"))["grammar"])
-    model = GeneratorPolicy(grammar, 256, 4).cuda()
+    model = GeneratorPolicy(grammar, 256, 4, learned_stop=True).cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=.0003)
     source = grammar.parse("div(ts_mean(close,5),ts_std(close,20))")
     observation = Observation(("source",), (source,), ((0.,) * 7,), (), (), 0.0)
@@ -133,6 +162,36 @@ def test_cuda_width256_replay_after_repeated_updates(monkeypatch):
             trajectory[-1]["reward"] = (index - 1.5) / 10
             complete_returns(trajectory)
             rows.extend(trajectory)
-        metrics = update(model, optimizer, rows, epochs=1, batch_size=16)
+        metrics = update(model, optimizer, rows, epochs=4, batch_size=16)
         assert metrics["old_logp_max_error"] <= 2e-5
         assert np.isfinite(metrics["actor_loss"])
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="需要CUDA设备"))])
+def test_width256_upper_ppo_replay_with_512_candidates(monkeypatch, device):
+    """在主实验的候选规模、网络宽度和小批设置下执行上层真实梯度更新。"""
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.manual_seed(19)
+    path = Path(__file__).parents[2] / "experiments/dual_ppo/base.json"
+    grammar = Grammar(**json.loads(path.read_text(encoding="utf-8"))["grammar"])
+    rng = random.Random(33)
+    trees, seen = [], set()
+    for _ in range(512):
+        tree = grammar.sample(rng, exclude=seen)
+        trees.append(tree)
+        seen.add(tree.id)
+    selector = SelectorPolicy(grammar, 256).to(device)
+    observation = SelectionObservation(tuple(trees), ((0.,) * 6,) * len(trees),
+        tuple(map(tuple, np.eye(len(trees)))), (), len(trees), "width256", True)
+    rows = []
+    for i in range(17):
+        selected = tuple(range(i))
+        row = selector.sample(replace(observation, selected=selected))
+        assert row["index"] not in selected
+        row["return"] = i / 17
+        rows.append(row)
+    metrics = update(selector, torch.optim.Adam(selector.parameters(), lr=.0003), rows, epochs=4, batch_size=16)
+    assert metrics["optimizer_steps"] == 8
+    assert metrics["old_logp_max_error"] <= 2e-5
+    assert np.isfinite(metrics["actor_loss"])

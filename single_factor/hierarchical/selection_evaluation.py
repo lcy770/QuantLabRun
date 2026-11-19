@@ -27,6 +27,40 @@ def daily_correlation(first, second, mask=None):
     return np.clip(result, -1.0, 1.0)
 
 
+def pairwise_day_correlation(values):
+    """批量计算同一天所有因子对在共同有效股票上的 Pearson 相关。"""
+    finite = np.isfinite(values)
+    if np.all(finite == finite[:1]):
+        z, _, variable = normalize(values, finite)
+        correlation = z @ z.T / max(1, int(finite[0].sum()))
+        correlation[~(variable[:, None] & variable)] = np.nan
+        return np.clip(correlation, -1.0, 1.0)
+
+    safe = np.where(finite, values, 0.0)
+    scale = np.max(abs(safe), axis=1)
+    scaled = safe / np.where(scale > 0, scale, 1.0)[:, None]
+    observed = finite.astype(float)
+    center = scaled.sum(1) / np.maximum(finite.sum(1), 1)
+    centered = np.where(finite, scaled - center[:, None], 0.0)
+    count = observed @ observed.T
+    denominator = np.maximum(count, 1)
+    sums = centered @ observed.T
+    variances = (centered * centered) @ observed.T - sums ** 2 / denominator
+    covariance = centered @ centered.T - sums * sums.T / denominator
+    # 少样本和常量无相关。接近零方差时按原单对算法重算，避开矩阵相减误差。
+    variable = np.min(values, axis=1, where=finite, initial=np.inf) < np.max(
+        values, axis=1, where=finite, initial=-np.inf)
+    usable = (count >= 3) & variable[:, None] & variable
+    stable = (variances > 1e-10 * count)
+    stable = usable & stable & stable.T
+    positive = np.maximum(variances, 0)
+    correlation = np.divide(covariance, np.sqrt(positive * positive.T),
+                            out=np.full_like(covariance, np.nan), where=stable)
+    for i, j in np.argwhere(np.tril(usable & ~stable, -1)):
+        correlation[i, j] = correlation[j, i] = daily_correlation(values[i:i+1], values[j:j+1])[0]
+    return np.clip(correlation, -1.0, 1.0)
+
+
 def block_deviation(daily, block_days=10):
     """将每日 IC 的不可计算值记零，计算连续交易日块均值的总体标准差。"""
     values = np.nan_to_num(daily, nan=0.0)
@@ -196,16 +230,22 @@ class SelectionEvaluator:
             values = [metrics["ic"], metrics["rank_ic"], np.tanh(metrics["icir"]), metrics["coverage"],
                       metrics["block_std"], metrics["invalid_day_fraction"]]
             features.append(tuple(np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0)))
-            raw_signals.append(self.segment(candidate.tree, "validation")[0] * candidate.direction)
-        correlations = np.eye(len(candidates))
-        for i, first in enumerate(raw_signals):
-            for j in range(i):
-                daily = daily_correlation(first, raw_signals[j])
-                rho = float(np.nanmean(daily)) if np.isfinite(daily).any() else 0.0
-                correlations[i, j] = correlations[j, i] = rho
+            raw_signals.append(self.segment(candidate.tree, "validation")[0])
+        correlations = np.zeros((len(candidates), len(candidates)))
+        if raw_signals:
+            valid_days = np.zeros_like(correlations, dtype=int)
+            for day in range(len(raw_signals[0])):
+                daily = pairwise_day_correlation(np.stack([signal[day] for signal in raw_signals]))
+                correlations += np.nan_to_num(daily)
+                valid_days += np.isfinite(daily)
+            directions = np.array([candidate.direction for candidate in candidates])
+            correlations = correlations / np.maximum(valid_days, 1) * np.outer(directions, directions)
+        np.fill_diagonal(correlations, 1.0)
         identity = digest([(candidate.tree.id, candidate.direction, candidate.proposal_id) for candidate in candidates])
+        independent_stop = maximum is None
+        maximum = max(1, len(candidates)) if independent_stop else maximum
         return SelectionObservation(tuple(c.tree for c in candidates), tuple(features),
-                                    tuple(map(tuple, correlations)), (), maximum, identity)
+                                    tuple(map(tuple, correlations)), (), maximum, identity, independent_stop)
 
     def utility(self, candidates, indices, segment="feedback", weights=None):
         """以同一有向等权组合计算三项上层奖励，空组合奖励为零。"""
@@ -244,11 +284,13 @@ class SelectionEvaluator:
                 "quality_penalty": quality_penalty, "invalid_day_fraction": float(invalid.mean()),
                 "daily_ic": daily.tolist(), "members": metrics}
 
-    def contributions(self, candidates, indices, segment="feedback"):
+    def contributions(self, candidates, indices, segment="feedback", *, proposal_ids=None):
         """固定已选成员并逐个移除，重新等权，返回 D 与两侧效用证据。"""
         whole = self.utility(candidates, indices, segment)
         result = {}
         for index in indices:
+            if proposal_ids is not None and candidates[index].proposal_id not in proposal_ids:
+                continue
             reduced = self.utility(candidates, [i for i in indices if i != index], segment)
             result[candidates[index].proposal_id] = {"value": whole["utility"] - reduced["utility"],
                 "whole_utility": whole["utility"], "without_utility": reduced["utility"],

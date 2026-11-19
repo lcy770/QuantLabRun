@@ -403,6 +403,8 @@ def build_panel_sql(
     fields: Iterable[str],
     start: Any = None,
     end: Any = None,
+    *,
+    category: Optional[str] = None,
 ) -> str:
     selected = list(dict.fromkeys(_panel_name(field) for field in fields))
     selects: List[str] = [
@@ -420,7 +422,11 @@ def build_panel_sql(
     if start is not None:
         where_parts.append(f"d.timestamps >= {_quote(_ymd(start, 'start_date'))}")
     if end is not None:
-        where_parts.append(f"d.timestamps <= {_quote(_ymd(end, 'end_date'))}")
+        end_day = _quote(_ymd(end, 'end_date'))
+        where_parts.append(f"d.timestamps < addDays(toDate({end_day}), 1)" if category is not None
+                           else f"d.timestamps <= {end_day}")
+    if category is not None:
+        where_parts.append(f"d.category = {_quote(category)}")
     where_parts.append(f"d.code IN {_code_list_sql(codes)}")
     join = f" LEFT ANY JOIN {live_db.DIM_TABLE} AS m ON d.code = m.SecuCode" if needs_dim else ""
     return (
@@ -1186,6 +1192,7 @@ def write_pool_panel(
     *,
     settings: Optional[live_db.LiveDBSettings] = None,
     client: Optional[live_db.ClickHouseHTTPClient] = None,
+    category: Optional[str] = None,
 ) -> Dict[str, Any]:
     """生成因子运行用的 ``panel.parquet``（直接由公司库流式写入）。
 
@@ -1242,7 +1249,7 @@ def write_pool_panel(
     written = False
     try:
         client.query_to_file(
-            build_panel_sql(codes, daily_fields, start_date, end_date),
+            build_panel_sql(codes, daily_fields, start_date, end_date, category=category),
             raw_path,
             timeout=settings.panel_timeout,
             max_execution_time=settings.panel_max_execution_time,

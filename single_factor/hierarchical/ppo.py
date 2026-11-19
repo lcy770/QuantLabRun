@@ -7,6 +7,13 @@ import numpy as np
 import torch
 
 
+def sample_edit_tail(model, row):
+    """固定已执行动作及任务条件，只采样剩余编辑。"""
+    condition = {"task": row["task"]} if "task" in row else {}
+    final, _ = model.sample(row["after"], remaining=row["step"] - 1, record=False, **condition)
+    return final
+
+
 @torch.no_grad()
 def continuation_returns(model, trajectories, rewards, evaluate, samples=4, states=8, rng=None, selected=None):
     """共使用 K 个终点样本，包含原路径和额外 K−1 条独立续采样路径。
@@ -37,9 +44,7 @@ def continuation_returns(model, trajectories, rewards, evaluate, samples=4, stat
             endpoints = [terminal.to_dict()]
             if (i, j) in selected:
                 for _ in range(samples - 1):
-                    # 当前动作已固定，从执行后的状态续采剩余动作，沿用同一任务条件。
-                    condition = {"task": row["task"]} if "task" in row else {}
-                    final, _ = model.sample(row["after"], remaining=row["step"] - 1, record=False, **condition)
+                    final = sample_edit_tail(model, row)
                     outcomes.append(float(evaluate(final)))
                     endpoints.append(final.to_dict())
                     branches += 1
@@ -73,18 +78,20 @@ def immediate_targets(rows):
         row["advantage"] = row["reward"] - row["value"]
 
 
-def gae_targets(rows, trace_lambda):
-    """计算有限回合、不折扣的广义优势估计，回合结束后的未来价值为零。"""
+def gae_targets(rows, trace_lambda, *, value_offsets=None):
+    """在奖励的尺度上估计优势，再把价值目标换回网络输出的尺度。"""
     # 从回合结束处反推 GAE，结束后的状态价值取 0。
     if not 0 <= trace_lambda <= 1:
         raise ValueError("GAE lambda must be between zero and one")
     advantage, next_value = 0.0, 0.0
-    for row in reversed(rows):
-        delta = row["reward"] + next_value - row["value"]
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        value = row["value"] - value_offsets[index] if value_offsets is not None else row["value"]
+        delta = row["reward"] + next_value - value
         advantage = delta + trace_lambda * advantage
         row["advantage"] = advantage
         row["value_target"] = row["value"] + advantage
-        next_value = row["value"]
+        next_value = value
 
 
 def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
@@ -108,12 +115,16 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
     explained = float(1 - np.var(targets - predicted) / np.var(targets)) if np.var(targets) > 1e-12 else None
     if advantages.std() > 1e-8 and len(rows) > 1:
         advantages = (advantages - advantages.mean()) / advantages.std()
+    evaluate_rows = model.rows if hasattr(model, "rows") else lambda batch: [model.row(row) for row in batch]
     history = []
     stopped = False
     # 更新前重算旧动作的对数概率，核验合法动作集合、任务条件和概率重放一致。
     with torch.no_grad():
-        replayed = model.rows(rows) if hasattr(model, "rows") else [model.row(row) for row in rows]
-        observed = np.array([float(value[0]) for value in replayed])
+        # 轨迹长度可变，重放也使用优化小批的大小，避免整批所有动作同时进入显存。
+        observed = np.empty(len(rows), dtype=np.float64)
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            observed[start:start + len(batch)] = [float(value[0]) for value in evaluate_rows(batch)]
         stored = np.array([row["logp"] for row in rows])
         if not np.isfinite(observed).all() or not np.isfinite(stored).all():
             raise AssertionError("old-policy action probability replay contains non-finite values")
@@ -143,7 +154,7 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
         rng.shuffle(order)
         for cursor in range(0, len(order), batch_size):
             indices = order[cursor:cursor + batch_size]
-            evaluated = model.rows([rows[i] for i in indices]) if hasattr(model, "rows") else [model.row(rows[i]) for i in indices]
+            evaluated = evaluate_rows([rows[i] for i in indices])
             logp = torch.stack([x[0] for x in evaluated])
             values = torch.stack([x[1] for x in evaluated])
             entropy = torch.stack([x[2] for x in evaluated]).mean()

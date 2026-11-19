@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import torch
 from torch import nn
 from torch.distributions import Categorical
+from torch.nn import functional as F
 
 from .models import LowerPolicy, LowerTask, RPNEncoder, UpperPolicy, mlp
 
@@ -13,13 +15,13 @@ from .models import LowerPolicy, LowerTask, RPNEncoder, UpperPolicy, mlp
 class GeneratorPolicy(nn.Module):
     """起点选择头与原生 RPN 去噪策略共用一个下层优化器和终点奖励。"""
 
-    def __init__(self, grammar, width, noise_steps):
+    def __init__(self, grammar, width, noise_steps, *, learned_stop=False):
         """复用现有起点网络及合法编辑策略，保留源公式的持续条件。"""
         super().__init__()
         self.grammar, self.width, self.noise_steps = grammar, width, noise_steps
         self.starter = UpperPolicy(grammar, width, representation="rpn")
         self.editor = LowerPolicy(grammar, width, noise_steps, use_task=True,
-                                  representation="rpn", edit_backend="rpn")
+                                  representation="rpn", edit_backend="rpn", learned_stop=learned_stop)
 
     def rows(self, rows):
         """按动作种类重放同一下层轨迹，返回各决策自己的概率、价值和熵。"""
@@ -57,7 +59,11 @@ class GeneratorPolicy(nn.Module):
             return None, [start_row], None
         noisy, _ = self.editor.corrupt(source, perturbation_steps, rng)
         task = LowerTask(source, (), (), 0.0)
-        final, edits = self.editor.sample(noisy, remaining=steps, record=record, task=task)
+        learned_stop = self.editor.stop_head is not None
+        if learned_stop and record:
+            start_row["edit_completed_at"] = perf_counter()
+        final, edits = self.editor.sample(noisy, remaining=None if learned_stop else steps,
+                                          record=record, task=task, time_edits=learned_stop and record)
         start_row["kind"] = "start"
         for row in edits:
             row["kind"] = "edit"
@@ -73,6 +79,7 @@ class SelectionObservation:
     selected: tuple
     maximum: int
     pool_id: str
+    independent_stop: bool = False
 
     def __post_init__(self):
         """验证候选、特征、相关矩阵和已选成员的一致性。"""
@@ -112,7 +119,8 @@ class SelectionTower(nn.Module):
         context = torch.cat((whole, selected, fraction))
         relations = reference.new_zeros((len(observation.trees), 3))
         if observation.selected:
-            rho = reference.new_tensor(observation.correlations)[:, list(observation.selected)]
+            # 每步只复制已选成员对应的列，避免反复搬运整个大候选池的矩阵。
+            rho = reference.new_tensor([[row[i] for i in observation.selected] for row in observation.correlations])
             relations = torch.stack((rho.min(1).values, rho.max(1).values, rho.mean(1)), dim=1)
         return values, context, relations
 
@@ -141,7 +149,12 @@ class SelectorPolicy(nn.Module):
             mask = torch.zeros(len(members), dtype=torch.bool, device=members.device)
             mask[blocked] = True
             members = members.masked_fill(mask, -torch.inf)
-        logits = torch.cat((members, self.stop_head(context).reshape(1)))
+        stop = self.stop_head(context).reshape(1)
+        if observation.independent_stop and len(blocked) < len(members):
+            # 先决定是否停止，继续时再在未选成员中分配概率。
+            logits = torch.cat((F.log_softmax(members, dim=0) + F.logsigmoid(-stop), F.logsigmoid(stop)))
+        else:
+            logits = torch.cat((members, stop))
         _, critic_context, _ = self.critic(observation, critic_encoding)
         return Categorical(logits=logits), self.value_head(critic_context).squeeze()
 
@@ -149,7 +162,11 @@ class SelectorPolicy(nn.Module):
     def sample(self, observation, deterministic=False):
         """采样或确定性选择一个成员/STOP，并保存 PPO 旧策略证据。"""
         distribution, value = self.distribution(observation)
-        index = int(distribution.logits.argmax() if deterministic else distribution.sample())
+        if deterministic and observation.independent_stop:
+            # 确定性推理也先比较停止与继续的概率，再挑具体成员。
+            index = len(observation.trees) if distribution.probs[-1] >= 0.5 else int(distribution.logits[:-1].argmax())
+        else:
+            index = int(distribution.logits.argmax() if deterministic else distribution.sample())
         return {"observation": observation, "index": index,
                 "logp": float(distribution.logits[index]), "value": float(value)}
 

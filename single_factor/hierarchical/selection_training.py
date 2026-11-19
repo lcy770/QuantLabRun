@@ -15,17 +15,18 @@ import torch
 from .ast import Grammar, Node
 from .io import append_json, check_budget, clean, event, save_json, save_torch
 from .models import model_metadata
-from .ppo import complete_returns, gae_targets, update
+from .ppo import update
 from .selection_config import ARCHITECTURE
 from .selection_evaluation import SelectionEvaluator, load_selection_task
 from .selection_models import GeneratorPolicy, SelectorPolicy
-from .selection_search import CandidatePool, ProposalCollector, StartBank, select_members, build_candidate_pool
+from .selection_search import CandidatePool, ProposalCollector, StartBank, select_members, build_candidate_pool, lower_targets
 
 
 def selection_bundle(generator, selector, config, **extra):
     """保存架构、完整两层参数、文法和奖励身份，禁止混用旧调度检查点。"""
     return {"format_version": 10, "architecture": ARCHITECTURE, "grammar": generator.grammar.config(),
             "width": generator.width, "noise_steps": generator.noise_steps,
+            "learned_stop": generator.editor.stop_head is not None,
             "lower": generator.state_dict(), "upper": selector.state_dict(),
             "model_metadata": model_metadata(generator, selector, generator.width),
             "configuration_hash": config["fingerprint"], "reward": config["reward"], **extra}
@@ -36,7 +37,8 @@ def restore_selection_models(bundle, device="cpu"):
     if bundle.get("architecture") != ARCHITECTURE or bundle.get("format_version") != 10:
         raise ValueError("not a candidate_selection checkpoint")
     grammar = Grammar(**bundle["grammar"])
-    generator = GeneratorPolicy(grammar, bundle["width"], bundle["noise_steps"]).to(device)
+    generator = GeneratorPolicy(grammar, bundle["width"], bundle["noise_steps"],
+                                learned_stop=bundle.get("learned_stop", False)).to(device)
     selector = SelectorPolicy(grammar, bundle["width"]).to(device)
     generator.load_state_dict(bundle["lower"])
     selector.load_state_dict(bundle["upper"])
@@ -58,7 +60,8 @@ class SelectionCampaign:
         np.random.seed(config["seed"])
         self.rng = random.Random(config["seed"])
         self.grammar = Grammar(**config["grammar"])
-        self.lower = GeneratorPolicy(self.grammar, config["width"], config["corpus"]["noise_steps"]).to(config["device"])
+        self.lower = GeneratorPolicy(self.grammar, config["width"], config["corpus"]["noise_steps"],
+                                     learned_stop=config["lower"].get("learned_stop", False)).to(config["device"])
         self.upper = SelectorPolicy(self.grammar, config["width"]).to(config["device"])
         self.lower_optimizer = torch.optim.Adam(self.lower.parameters(), lr=config["lower"]["learning_rate"])
         self.upper_optimizer = torch.optim.Adam(self.upper.parameters(), lr=config["upper"]["learning_rate"])
@@ -234,26 +237,10 @@ class SelectionCampaign:
             generator_version=self.state["lower_updates"])
 
     def _lower_update(self, proposals, task, tag, contributions=None):
-        """同一终点奖励训练起点及所有编辑，D 只归因到本批真实生成来源。"""
-        contributions = contributions or {}
-        trajectories = []
-        rewards = []
-        feedback = []
-        for proposal in proposals:
-            contribution = contributions.get(proposal["proposal_id"], {}).get("value", 0.0)
-            reward = proposal["base_reward"] + self.config["reward"]["eta"] * contribution
-            rows = proposal["rows"]
-            if not rows:
-                raise AssertionError("lower PPO requires a recorded start decision")
-            for row in rows:
-                row["reward"] = 0.0
-            rows[-1]["reward"] = reward
-            complete_returns(rows)
-            gae_targets(rows, self.config["lower"]["gae_lambda"])
-            trajectories.extend(rows)
-            rewards.append(reward)
-            feedback.append({"proposal_id": proposal["proposal_id"], "base_reward": proposal["base_reward"],
-                "contribution": contribution, "eta": self.config["reward"]["eta"], "terminal_reward": reward})
+        """复用实验入口的下层终点评分及续采样方法。"""
+        trajectories, feedback, eta, continuation = lower_targets(self.lower, proposals, self.config,
+            contributions, self.evaluators[task["name"]], self.state["reference_seconds"])
+        feedback = [{**row, "eta": eta, "terminal_reward": row["reward"]} for row in feedback]
         if self.config["record_rollouts"]:
             save_torch(self.output / "rollouts" / f"{tag}.pt", {"models": selection_bundle(self.lower, self.upper, self.config),
                 "rows": trajectories, "feedback": feedback, "task": task["name"],
@@ -262,7 +249,8 @@ class SelectionCampaign:
         metrics = update(self.lower, self.lower_optimizer, trajectories, rng=self.rng, **self.config["lower"]["ppo"])
         self.state["lower_updates"] += 1
         self.state["history"]["lower"].append({"tag": tag, "task": task["name"], **metrics,
-            "mean_terminal_reward": float(np.mean(rewards)), "contribution_feedback": feedback,
+             "mean_terminal_reward": float(np.mean([row["reward"] for row in feedback])),
+             "contribution_feedback": feedback, "edit_continuations": continuation,
             "generator_version": self.state["lower_updates"], "wall_seconds": self.elapsed()})
 
     def _upper_update(self, task=None, tag="upper"):
