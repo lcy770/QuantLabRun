@@ -389,6 +389,52 @@ class LowerPolicy(nn.Module):
         """从轨迹行提取状态、动作、合法动作集合和任务，批量返回 PPO 所需的概率、价值及熵。"""
         return self.evaluate_batch([(r["tree"], r["step"], r["action"], r.get("legal_actions"), r.get("task")) for r in rows])
 
+    def _sampling_distributions(self, tree, step, query, legal_actions=None):
+        """保持采样时的编码批次，构造位置分布及指定位置的条件替换分布。"""
+        grouped = defaultdict(list)
+        if legal_actions is not None:
+            for action in legal_actions:
+                grouped[action.path].append(action)
+            paths = sorted(grouped)
+        else:
+            paths = self.edit_kernel.edit_paths(tree)
+        nodes = self.edit_kernel.positions(tree)
+        enc = self.actor_encoder.encode([tree])
+        time = self.actor_time.weight[step]
+        node_features = torch.stack([enc[nodes[path]] for path in paths])
+        if self.use_position:
+            node_features = node_features + self.position_bias(paths)
+        contexts = torch.stack([torch.cat((enc[tree], feature, time)) for feature in node_features])
+        position_logits = self.node_head(contexts).flatten()
+        if self.use_task:
+            position_logits = position_logits + node_features @ query / math.sqrt(self.width)
+
+        def replacements_at(index):
+            """仅编码当前位置的替换，与实际采样使用相同矩阵形状及计算顺序。"""
+            choices = grouped[paths[index]] if legal_actions is not None else self.edit_kernel.edits_at(tree, paths[index])
+            replacements = self.actor_encoder.encode([], roots=[action.replacement for action in choices])
+            inputs = torch.stack([torch.cat((enc[tree], node_features[index], time, replacements[action.replacement]))
+                                  for action in choices])
+            logits = self.edit_head(inputs).flatten()
+            if self.use_task:
+                logits = logits + torch.stack([replacements[action.replacement] for action in choices]) @ query / math.sqrt(self.width)
+            return choices, Categorical(logits=logits)
+
+        ordered = tuple(action for path in paths for action in grouped[path]) if legal_actions is not None else None
+        return paths, Categorical(logits=position_logits), replacements_at, ordered
+
+    def replay_logp(self, row):
+        """不抽样、不改旧概率，按录制时的批次布局复核指定动作的联合概率。"""
+        tree = self.edit_kernel.from_node(row["tree"])
+        action = self.edit_kernel.native_edit(tree, row["action"])
+        actions = tuple(self.edit_kernel.native_edit(tree, edit)
+                        for edit in (row.get("legal_actions") or self.edit_kernel.edits(tree)))
+        query = self.task_embedding(row.get("task"), self.actor_encoder, self.actor_task) if self.use_task else None
+        paths, positions, replacements_at, _ = self._sampling_distributions(tree, row["step"], query, actions)
+        index = paths.index(action.path)
+        choices, edits = replacements_at(index)
+        return positions.logits[index] + edits.logits[choices.index(action)]
+
     @torch.no_grad()
     def sample(self, tree, remaining=None, record=True, task=None):
         # 从扰动后的表达式开始，按剩余步数逐步生成反向编辑轨迹。
@@ -407,34 +453,10 @@ class LowerPolicy(nn.Module):
         query = self.task_embedding(task, self.actor_encoder, self.actor_task) if self.use_task else None
         critic_bias = self.task_embedding(task, self.critic_encoder, self.critic_task) if self.use_task and record else None
         for step in range(remaining, 0, -1):
-            grouped = defaultdict(list)
-            if record:
-                # 训练录制全部合法动作，供后续概率重放和精确熵计算使用。
-                for action in self.edit_kernel.edits(tree):
-                    grouped[action.path].append(action)
-                paths = sorted(grouped)
-            else:
-                # 纯搜索先列可编辑位置，再按选中位置构造替换，减少候选枚举。
-                paths = self.edit_kernel.edit_paths(tree)
-            nodes = self.edit_kernel.positions(tree)
-            enc = self.actor_encoder.encode([tree])
-            time = self.actor_time.weight[step]
-            node_features = torch.stack([enc[nodes[path]] for path in paths])
-            if self.use_position:
-                node_features = node_features + self.position_bias(paths)
-            contexts = torch.stack([torch.cat((enc[tree], feature, time)) for feature in node_features])
-            position_logits = self.node_head(contexts).flatten()
-            if self.use_task:
-                position_logits = position_logits + node_features @ query / math.sqrt(self.width)
-            positions = Categorical(logits=position_logits)
+            actions = self.edit_kernel.edits(tree) if record else None
+            _, positions, replacements_at, ordered = self._sampling_distributions(tree, step, query, actions)
             i = int(positions.sample())
-            choices = grouped[paths[i]] if record else self.edit_kernel.edits_at(tree, paths[i])
-            replacements = self.actor_encoder.encode([], roots=[a.replacement for a in choices])
-            edit_inputs = torch.stack([torch.cat((enc[tree], node_features[i], time, replacements[a.replacement])) for a in choices])
-            edit_logits = self.edit_head(edit_inputs).flatten()
-            if self.use_task:
-                edit_logits = edit_logits + torch.stack([replacements[a.replacement] for a in choices]) @ query / math.sqrt(self.width)
-            edits = Categorical(logits=edit_logits)
+            choices, edits = replacements_at(i)
             j = int(edits.sample())
             action = choices[j]
             if record:
@@ -446,7 +468,7 @@ class LowerPolicy(nn.Module):
                 value = self.value_head(torch.cat((critic, critic_time))).squeeze()
                 row = {"tree": tree, "step": step, "action": action,
                        "logp": float(positions.logits[i] + edits.logits[j]), "value": float(value),
-                       "legal_actions": tuple(a for path in paths for a in grouped[path])}
+                       "legal_actions": ordered}
                 if self.edit_backend == "rpn":
                     row["token_edit"] = {"start": action.start, "stop": action.stop,
                                          "replacement_tokens": action.replacement.tokens}

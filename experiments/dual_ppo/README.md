@@ -178,7 +178,7 @@ python -m single_factor.hierarchical.comparison_cli run --protocol var/experimen
 
 ### 到达预算后继续训练
 
-时间预算只是本轮检查点，可以在查看效果后继续追加。`extend` 继承模型权重、优化器及其动量、随机状态、候选池、历史记录和累计训练轮数；旧轮数上限不会截断新增时间。追加时间作用于所选节点的最后训练阶段：`g_diffusion` 为下层，`s_upper_ppo` 为上层，`c_alternating` 为两层交替。训练指标仍持续计算，节点 `progress.json` 的 `latest_metrics` 给出最近一次更新指标，上层更新含 `mean_return` 和 `mean_ic`。
+时间预算只是本轮检查点，可以在查看效果后继续追加。`extend` 继承模型权重、优化器及其动量、随机状态、候选池、历史记录和累计训练轮数；旧轮数上限不会截断新增时间。追加时间作用于所选节点的最后训练阶段：`g_diffusion` 为下层，`s_upper_ppo` 为上层，`c_alternating` 为两层交替。若已进入后续准备阶段，会重新打开要追加的训练阶段；下层更新后先刷新对应版本的候选池，再训练上层。训练指标仍持续计算，节点 `progress.json` 的 `latest_metrics` 给出最近一次更新指标，上层更新含 `mean_return` 和 `mean_ic`。
 
 下面从主算法上次检查点再追加24小时，结果放在新轮次目录，原模型和评价不覆盖：
 
@@ -193,6 +193,12 @@ python -m single_factor.hierarchical.comparison_cli extend --protocol var/experi
 ```
 
 去掉 `--train-only` 可在训练结束后完整评价；也可单独用本轮协议和results目录执行 `run --nodes c_alternating --seeds 0`。评价使用本轮模型重新计算，父轮结果不混入。每一轮保留来源协议、检查点SHA256、代码版本指纹与累计耗时。只复制必要的学习状态，不重训已经完成的依赖。支持从旧版比较实验检查点显式接续：先核验数据、奖励、网络配置和算法节点定义保持一致，建立带来源记录的新协议，随后按当前源码严格恢复；不会把旧协议冒充为当前协议。网络宽度或数据改变不属于时间续训。原起点调度旧双层的独立Campaign暂不通过此入口延长。
+
+### GPU旧概率重放检查
+
+采样按单次状态计算，训练重放共享整批公式编码，CUDA在不同批次形状下可能产生细微数值差异。批量重放超出 `2e-5` 时，程序按原采样批次和相同合法动作逐条复核，单条阈值仍为 `2e-5`。非有限值、单条真实错配，或超过 `min(2e-4, clip×0.001)` 的批量偏差仍会在优化前报错。旧策略概率保持录制值。训练指标分别记录 `old_logp_max_error`、`old_logp_batch_max_error` 和 `old_logp_scalar_checks`。
+
+在训练机上可执行 `python -m pytest single_factor/tests/test_ppo_replay.py -q`，其中真实CUDA用例使用完整文法、256宽度及多轮PPO更新。本机无CUDA时该用例会跳过。若旧版本在下层更新前因重放检查失败，可用 `extend --node g_diffusion` 从已保存的下层轮次接续；下层完成后在同一新协议和results目录执行 `run --nodes c_alternating --seeds 0 --train-only`，复用结构预训练和下层，继续上层及交替训练。
 
 ## 主要对比组长训练（后续可选）
 

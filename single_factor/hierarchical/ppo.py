@@ -113,9 +113,31 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
     # 更新前重算旧动作的对数概率，核验合法动作集合、任务条件和概率重放一致。
     with torch.no_grad():
         replayed = model.rows(rows) if hasattr(model, "rows") else [model.row(row) for row in rows]
-        error = max(abs(float(replayed[i][0]) - row["logp"]) for i, row in enumerate(rows))
-    if error > 2e-5:
-        raise AssertionError(f"old-policy action probability replay mismatch: {error}")
+        observed = np.array([float(value[0]) for value in replayed])
+        stored = np.array([row["logp"] for row in rows])
+        if not np.isfinite(observed).all() or not np.isfinite(stored).all():
+            raise AssertionError("old-policy action probability replay contains non-finite values")
+        differences = np.abs(observed - stored)
+        batch_error = float(differences.max())
+        fallback = np.flatnonzero(differences > 2e-5)
+        # CUDA批次形状可改变数值归约；超差时按实际采样路径复核，原阈值保持不变。
+        for index in fallback:
+            row = rows[index]
+            if hasattr(model, "replay_logp"):
+                actual = model.replay_logp(row)
+            elif hasattr(model, "row"):
+                actual = model.row(row)[0]
+            else:
+                actual = model.rows([row])[0][0]
+            difference = abs(float(actual) - stored[index])
+            if not np.isfinite(difference) or difference > 2e-5:
+                raise AssertionError(f"old-policy action probability replay mismatch: {difference} "
+                                     f"(row={index}, batch_error={batch_error})")
+            differences[index] = difference
+        # 仅接受很小的批次数值漂移；即使单条复核通过，也不能掩盖批量实现错误。
+        if batch_error > min(2e-4, clip * 1e-3):
+            raise AssertionError(f"old-policy batch probability replay mismatch: {batch_error}")
+        error = float(differences.max())
     for _ in range(epochs):
         order = list(range(len(rows)))
         rng.shuffle(order)
@@ -152,5 +174,6 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
               for key in ("actor_loss", "value_loss", "entropy", "approx_kl")}
     return losses | {
         "old_logp_max_error": error, "samples": len(rows),
+        "old_logp_batch_max_error": batch_error, "old_logp_scalar_checks": len(fallback),
         "advantage_std_before_normalization": raw_std, "value_explained_variance": explained,
         "kl_early_stop": stopped, "optimizer_steps": len(history)}

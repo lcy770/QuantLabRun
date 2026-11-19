@@ -527,6 +527,30 @@ def test_extend_rejects_changed_inputs(protocol, tmp_path, changed):
     assert not output.exists()
 
 
+def test_extend_generator_reopens_stage_and_refreshes_pools_before_upper_training(protocol, tmp_path):
+    """阶段刚结束也能追加下层更新，之后上层必须使用更新后生成器的候选池。"""
+    from single_factor.hierarchical.comparison_resume import extend_study
+
+    source = tmp_path / "generator_source"
+    run_study(protocol, source, [0], nodes=["g_diffusion"], train_only=True)
+    checkpoint = source / "seed_0/nodes/g_diffusion/checkpoint.pt"
+    saved = torch.load(checkpoint, weights_only=False)
+    original_iteration = saved["state"]["lower_iteration"]
+    saved["state"]["phase"] = "freeze"
+    torch.save(saved, checkpoint)
+    output = tmp_path / "generator_extension"
+    extend_study(protocol, source, output, "g_diffusion", 0, 1e-9, train_only=True)
+    study = Study(output / "protocol/protocol.json", output / "results")
+    continued = study.saved_node("g_diffusion", 0)
+    assert continued["state"]["lower_iteration"] == original_iteration + 1
+    assert all(pool["generator_version"] == continued["state"]["generator_version"]
+               for pool in continued["pools"].values())
+    run_study(output / "protocol/protocol.json", output / "results", [0], nodes=["c_alternating"], train_only=True)
+    upper = study.saved_node("s_upper_ppo", 0)
+    assert all(pool["generator_version"] == continued["state"]["generator_version"]
+               for pool in upper["pools"].values())
+
+
 @pytest.mark.parametrize("hours", [0, -1, float("nan"), float("inf"), True])
 def test_extend_rejects_invalid_hours(tmp_path, hours):
     """拒绝非法追加时长，避免无限预算或无效目录。"""

@@ -453,7 +453,8 @@ class NodeRunner:
         if self.state["phase"] == "freeze":
             if not self.spec.get("syntax"):
                 for task in self.study.training_tasks:
-                    if task["name"] not in self.pools:
+                    if (task["name"] not in self.pools
+                            or self.pools[task["name"]].get("generator_version") != self.state["generator_version"]):
                         self.freeze_pool(task, f"frozen_{task['name']}")
                         self.commit()
             self.state["phase"] = "upper"

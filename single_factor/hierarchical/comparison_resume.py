@@ -82,7 +82,8 @@ def _prepare_extension(protocol, source, output, request):
                             for key in ("generator_source", "selector_source") if key in definitions[name]}
             item["identity"] = identities[name] = digest([child["fingerprint"], name, seed, dependencies])
             item["state"]["continued_from"] = {"identity": parent["fingerprint"], "checkpoint_sha256": checksums[name]}
-            if name == node and item["state"]["phase"] == "complete":
+            stages = ("syntax", "lower", "freeze", "upper", "continuation", "complete")
+            if name == node and stages.index(item["state"]["phase"]) > stages.index(phase):
                 item["state"]["phase"] = phase
             save_torch(ready / "results" / f"seed_{seed}" / "nodes" / name / "checkpoint.pt", item)
         calibration = source / f"seed_{seed}" / "calibration.json"
