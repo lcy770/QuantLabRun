@@ -422,6 +422,54 @@ def test_train_only_then_evaluate_reuses_models(protocol, tmp_path, monkeypatch)
     assert {path: file_hash(path) for path in hashes} == hashes
 
 
+@pytest.mark.parametrize("contribution", [None, 0.0, .3, -.3])
+def test_lower_D_uses_explicit_stage_weight(protocol, monkeypatch, contribution):
+    """独立下层D权重为零，联合阶段对正负成员贡献均按权重一计分。"""
+    from single_factor.hierarchical import comparison_generators
+    from single_factor.hierarchical.ast import Grammar
+    from single_factor.hierarchical.models import Observation
+
+    config = json.loads(protocol.read_text())["config"]
+    config["reward"]["eta"] = 1.0
+    g = Grammar(**config["grammar"])
+    generator = comparison_generators.DiffusionBackend(g, config)
+    source = g.parse("volume")
+    observation = Observation((source.id,), (source,), ((0.,) * 7,), (), (), 0.0)
+    _, rows, _ = generator.generate(observation, random.Random(19), 2, 1)
+    proposal = {"proposal_id": "new", "base_reward": .2, "rows": rows}
+    expected = .2 + (contribution or 0.0)
+
+    def capture(model, optimizer, replay_rows, **kwargs):
+        """核对实际送入PPO的终点奖励及起点、编辑的共同回报。"""
+        assert replay_rows[-1]["reward"] == pytest.approx(expected)
+        assert all(row["return"] == pytest.approx(expected) for row in replay_rows)
+        return {"optimizer_steps": 1}
+
+    monkeypatch.setattr(comparison_generators, "update", capture)
+    feedback = None if contribution is None else {"new": {"value": contribution}}
+    metrics = generator.learn([proposal], random.Random(19), feedback)
+    assert metrics["eta_effective"] == (0.0 if contribution is None else 1.0)
+
+
+def test_joint_training_enables_D_only_after_independent_lower(protocol, tmp_path):
+    """通过真实训练入口确认独立阶段和交替阶段的有效D权重分别为0和1。"""
+    config_path = protocol.with_name("config.json")
+    config = json.loads(config_path.read_text())
+    config["reward"]["eta"] = 1.0
+    save_json(config_path, config)
+    definition = json.loads(protocol.read_text())
+    definition["config"] = load_selection_config(config_path)
+    definition["fingerprint"] = digest({key: value for key, value in definition.items() if key != "fingerprint"})
+    save_json(protocol, definition)
+    output = tmp_path / "eta_stages"
+    run_study(protocol, output, [0], nodes=["c_alternating"], train_only=True)
+    study = Study(protocol, output)
+    independent = study.saved_node("g_diffusion", 0)["state"]["history"]
+    joint = study.saved_node("c_alternating", 0)["state"]["history"]
+    assert [row["eta_effective"] for row in independent if row["stage"] == "lower"] == [0.0]
+    assert [row["eta_effective"] for row in joint if row["stage"] == "lower"] == [1.0]
+
+
 def test_extend_preserves_learning_state_and_supports_multiple_rounds(protocol, tmp_path, monkeypatch):
     """到期及中断均能接续，继承优化器和随机流，旧模型与评价保持不变。"""
     import sys

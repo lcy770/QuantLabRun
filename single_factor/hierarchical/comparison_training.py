@@ -370,7 +370,7 @@ class NodeRunner:
             before = copy.deepcopy(self.generator.checkpoint()) if self.config["record_rollouts"] else None
             pool, proposals, report = self.generate(task, self.config["lower"]["batch_formulas"], tag,
                                                     record=isinstance(self.generator, DiffusionBackend), background=background)
-            contributions = {}
+            contributions = None
             if feedback:
                 observation = self.evaluator(task).observation(pool.candidates, self.config["upper"]["max_members"])
                 _, _, _, contributions = select_members(self.selector, observation, self.evaluator(task), pool.candidates,

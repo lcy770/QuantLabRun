@@ -24,11 +24,15 @@ class StartBank:
         self.entries = {tree.id: {"tree": tree, "attempts": 0, "reward_sum": 0.0,
                                   "qualified": 0, "duplicates": 0, "known": True} for tree in initial}
         self.new = {"attempts": 0, "reward_sum": 0.0, "qualified": 0, "duplicates": 0}
+        self.signal_hashes = set()
 
     def observe(self, evaluator, limit, remaining=1.0):
         """从质量与低访问起点轮换构造固定短名单，末动作由网络表示 NEW。"""
         entries = list(self.entries.values())
-        qualities = {entry["tree"].id: evaluator.assess(entry["tree"], "start")[0].quality for entry in entries}
+        assessed = {entry["tree"].id: evaluator.assess(entry["tree"], "start")[0] for entry in entries}
+        qualities = {identity: candidate.quality for identity, candidate in assessed.items()}
+        # 用本任务G段信号去重，同时为旧检查点中的起点库补齐信号身份。
+        self.signal_hashes = {candidate.signal_hash for candidate in assessed.values()}
         groups = [sorted(entries, key=lambda e: (-qualities[e["tree"].id], e["tree"].id)),
                   sorted(entries, key=lambda e: (e["attempts"], e["tree"].id))]
         chosen, seen = [], set()
@@ -60,10 +64,14 @@ class StartBank:
             entry["reward_sum"] += proposal["base_reward"]
             entry["qualified"] += int(proposal["eligible"])
             entry["duplicates"] += int(proposal.get("duplicate", False))
-            if proposal["eligible"]:
+            if proposal["eligible"] and not proposal.get("duplicate", False):
                 candidate = proposal["candidate"]
-                self.entries.setdefault(candidate.tree.id, {"tree": candidate.tree, "attempts": 0,
-                    "reward_sum": 0.0, "qualified": 0, "duplicates": 0, "known": False})
+                hashes = getattr(self, "signal_hashes", set())
+                if candidate.tree.id not in self.entries and candidate.signal_hash not in hashes:
+                    self.entries[candidate.tree.id] = {"tree": candidate.tree, "attempts": 0,
+                        "reward_sum": 0.0, "qualified": 0, "duplicates": 0, "known": False}
+                    hashes.add(candidate.signal_hash)
+                self.signal_hashes = hashes
 
 
 class CandidatePool:

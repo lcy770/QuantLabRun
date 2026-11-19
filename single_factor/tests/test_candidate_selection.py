@@ -197,6 +197,27 @@ def test_utility_equal_weights_missing_and_leave_one_out_match_direct_calculatio
         evaluator.utility(candidates, [0, 0])
 
 
+def test_start_bank_rejects_duplicate_signals_within_and_across_batches():
+    """起点池只添加达标的新信号，不能绕过候选池去重或在下一批重复入库。"""
+    from single_factor.hierarchical.selection_evaluation import Candidate
+
+    g = grammar()
+    first = Candidate(g.parse("close"), 1, .5, {}, "same_signal", "first")
+    duplicate = Candidate(g.parse("volume"), 1, .5, {}, "same_signal", "duplicate")
+    unique = Candidate(g.parse("amount"), 1, .5, {}, "unique_signal", "unique")
+    bank = StartBank([first.tree])
+    # 模拟旧检查点未保存新增字段，首次观察应按本任务补齐。
+    del bank.signal_hashes
+    bank.observe(SimpleNamespace(assess=lambda tree, identity: (first, True)), 4)
+    for candidate, initial in ((duplicate, [first]), (duplicate, []), (unique, [])):
+        proposal = {"candidate": candidate, "eligible": True, "source_id": first.tree.id, "base_reward": .5}
+        CandidatePool(8, initial).add(proposal)
+        bank.commit([proposal])
+    assert set(bank.entries) == {first.tree.id, unique.tree.id}
+    assert bank.entries[first.tree.id]["attempts"] == 3
+    assert bank.signal_hashes == {"same_signal", "unique_signal"}
+
+
 def test_upper_inputs_never_depend_on_feedback_labels_and_direction_is_fit_only(tmp_path):
     from single_factor.hierarchical.__main__ import load_config
     config = load_config(config_file(tmp_path))

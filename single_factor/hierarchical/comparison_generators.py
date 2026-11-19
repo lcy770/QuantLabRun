@@ -63,11 +63,12 @@ class DiffusionBackend:
 
     def learn(self, proposals, rng, contributions=None):
         """将 Q、真实成本及可选局部 D 反馈到起点与所有去噪动作。"""
+        eta = self.config["reward"]["eta"] if contributions is not None else 0.0
         contributions = contributions or {}
         rows, feedback = [], []
         for proposal in proposals:
             d = contributions.get(proposal["proposal_id"], {}).get("value", 0.0)
-            reward = proposal["base_reward"] + self.config["reward"]["eta"] * d
+            reward = proposal["base_reward"] + eta * d
             trajectory = proposal["rows"]
             if not trajectory:
                 raise ValueError("financial diffusion PPO requires recorded trajectories")
@@ -80,7 +81,7 @@ class DiffusionBackend:
             feedback.append({"proposal_id": proposal["proposal_id"], "base_reward": proposal["base_reward"],
                              "contribution": d, "reward": reward})
         result = update(self.policy, self.optimizer, rows, rng=rng, **self.config["lower"]["ppo"])
-        return {**result, "feedback": feedback, "update_type": "ppo"}
+        return {**result, "feedback": feedback, "update_type": "ppo", "eta_effective": eta}
 
     def checkpoint(self):
         """保存权重及两类优化器状态。"""
