@@ -206,7 +206,9 @@ python -m single_factor.hierarchical.comparison_cli status --output var/experime
 python -m single_factor.hierarchical.comparison_cli summarize --output var/experiments/results_2025h2_2026_long
 ```
 
-结果目录包含 `comparison.csv`、`weight_comparison.csv`、`seed_means.json`、`paired_differences.json`，以及 `seed_<种子>/nodes/<节点>/training/` 内的逐次报告。汇总表和逐次报告都记录训练期评价用途。报告记录表达式、固定方向、成员、奖励分项、候选池身份、训练成本与逐日净值。`manifest.json` 保存环境版本，`source_snapshot/` 保存本次源码。
+结果目录包含 `comparison.csv`、`weight_comparison.csv`、`seed_means.json`、`paired_differences.json`，以及 `seed_<种子>/nodes/<节点>/training/` 内的逐次报告。汇总表和逐次报告都记录训练期评价用途。报告记录表达式、固定方向、成员、奖励分项、候选池身份、训练成本与逐日净值。`manifest.json` 保存环境版本、共用网络宽度 `width` 和独立的自回归宽度 `rpn_width`，`source_snapshot/` 保存本次源码。
+
+每个真实模型目录另存 `model_metadata.json`，检查点 `checkpoint.pt` 和节点 `progress.json` 中也包含同样的 `model_metadata`。其中记录实际上下层网络类型、各自宽度、参数量、可训练参数量、权重精度、权重字节数，以及总参数量、实验名和训练种子。共享别名沿来源模型目录查看。统计只包含策略和价值神经网络，不包含优化器、DQN目标副本或LinUCB等非神经方法的系数。非神经方法标为零神经参数，原生RPN PPO按自己的实际宽度统计。原有双层和独立候选选择训练保存的模型包同样附带规模元数据；历史检查点仍可按原格式加载。
 
 ## 冻结与后续独立检验
 

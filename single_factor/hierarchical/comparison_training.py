@@ -18,6 +18,7 @@ from .comparison_generators import AutoregressivePPO, DiffusionBackend, RandomEd
 from .comparison_metrics import locked_ridge_weights, prediction_for, top50_metrics, prediction_rank_ic
 from .comparison_selectors import create_selector
 from .io import append_json, check_budget, digest, run_lock, save_json, save_torch
+from .models import model_metadata
 from .selection_evaluation import SelectionEvaluator, load_selection_task
 from .selection_search import CandidatePool, StartBank, build_candidate_pool, select_members
 
@@ -325,16 +326,26 @@ class NodeRunner:
                 "selector_source": self.spec.get("selector_source"), "paired_training_seed": seed,
                 "generator_parameter_hash": policy_hash(initial.get("policy", {})),
                 "selector_parameter_hash": policy_hash(self.selector.checkpoint().get("policy", {})) if self.selector else None})
+        autoregressive = isinstance(self.generator, AutoregressivePPO)
+        lower = self.generator.model.policy if autoregressive else getattr(self.generator, "policy", None)
+        upper = getattr(self.selector, "policy", getattr(self.selector, "online", None))
+        lower_width = self.config.get("autoregressive", {}).get("width", 128) if autoregressive else self.config["width"]
+        self.model_metadata = {**model_metadata(lower, upper, self.config["width"], lower_width=lower_width),
+                               "node": name, "training_seed": seed, "generator": self.spec["generator"],
+                               "selector": self.method}
+        save_json(self.root / "model_metadata.json", self.model_metadata)
         self.reference = study.reference_seconds(seed)
 
     def commit(self):
         """原子保存所有模型、优化器、种群、经验池、候选池和随机流。"""
         save_torch(self.root / "checkpoint.pt", {"identity": self.identity, "state": self.state,
+            "model_metadata": self.model_metadata,
             "generator": self.generator.checkpoint(), "selector": self.selector.checkpoint() if self.selector else None,
             "banks": self.banks, "pools": self.pools, "python_rng": random.getstate(),
             "numpy_rng": np.random.get_state(), "torch_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []})
-        save_json(self.root / "progress.json", {**self.state, "history": None, "identity": self.identity})
+        save_json(self.root / "progress.json", {**self.state, "history": None, "identity": self.identity,
+                                               "model_metadata": self.model_metadata})
         save_json(self.root / "training_history.json", self.state["history"])
 
     def evaluator(self, task):

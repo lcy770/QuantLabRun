@@ -13,6 +13,24 @@ from .ast import Node, replace, walk
 from .rpn import RPNKernel, RPNProgram, token_vocabulary
 
 
+def model_metadata(lower, upper, width, *, lower_width=None):
+    """统计实际策略网络规模；非神经方法记零，优化器和DQN目标副本不计入。"""
+    result = {"width": width, "parameter_scope": "neural_policy_and_value_networks"}
+    for name, model, hidden_width in (("lower", lower, width if lower_width is None else lower_width),
+                                      ("upper", upper, width)):
+        parameters = list(model.parameters()) if model is not None else []
+        result[name] = {"network": type(model).__name__ if model is not None else None,
+                        "width": hidden_width if model is not None else None,
+                        "parameter_count": sum(parameter.numel() for parameter in parameters),
+                        "trainable_parameter_count": sum(parameter.numel() for parameter in parameters
+                                                         if parameter.requires_grad),
+                        "dtypes": sorted({str(parameter.dtype).removeprefix("torch.") for parameter in parameters}),
+                        "weight_bytes": sum(parameter.numel() * parameter.element_size() for parameter in parameters)}
+    result["total_parameters"] = result["lower"]["parameter_count"] + result["upper"]["parameter_count"]
+    result["total_weight_bytes"] = result["lower"]["weight_bytes"] + result["upper"]["weight_bytes"]
+    return result
+
+
 def token_name(node):
     """将公式节点转换为词表键，常量和窗口键包含规范化后的数值。"""
     if node.symbol == "constant":

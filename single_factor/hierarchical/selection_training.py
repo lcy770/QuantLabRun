@@ -14,6 +14,7 @@ import torch
 
 from .ast import Grammar, Node
 from .io import append_json, check_budget, clean, event, save_json, save_torch
+from .models import model_metadata
 from .ppo import complete_returns, gae_targets, update
 from .selection_config import ARCHITECTURE
 from .selection_evaluation import SelectionEvaluator, load_selection_task
@@ -26,6 +27,7 @@ def selection_bundle(generator, selector, config, **extra):
     return {"format_version": 10, "architecture": ARCHITECTURE, "grammar": generator.grammar.config(),
             "width": generator.width, "noise_steps": generator.noise_steps,
             "lower": generator.state_dict(), "upper": selector.state_dict(),
+            "model_metadata": model_metadata(generator, selector, generator.width),
             "configuration_hash": config["fingerprint"], "reward": config["reward"], **extra}
 
 

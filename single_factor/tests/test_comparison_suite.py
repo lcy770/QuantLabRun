@@ -84,6 +84,9 @@ def test_resume_normalizes_cuda_rng_states_to_cpu(protocol, tmp_path, monkeypatc
         create = lambda: campaign_type(config, output, resume=True)
         checkpoint = output / "training_state.pt"
     original.commit()
+    metadata = torch.load(checkpoint, weights_only=False)["model_metadata"]
+    assert metadata["width"] == original.config["width"]
+    assert metadata["total_parameters"] > 0
     if getattr(original, "collector", None):
         original.collector.close()
     original_load = torch.load
@@ -165,6 +168,9 @@ def test_all_experiment_nodes_train_restore_freeze_and_evaluate(protocol, tmp_pa
     assert result["evaluation_scope"] == comparison_scope
     assert result["evaluation_uses_training_data"] == (comparison_scope == "training")
     study = Study(protocol, output)
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["width"] == study.config["width"]
+    assert manifest["rpn_width"] == study.config["autoregressive"]["width"]
     if comparison_scope == "training":
         assert study.evaluation_tasks("training") == study.training_tasks
         reports = list(output.glob("seed_*/nodes/*/training/*.json"))
@@ -176,6 +182,17 @@ def test_all_experiment_nodes_train_restore_freeze_and_evaluate(protocol, tmp_pa
     for name, definition in experiment_nodes().items():
         saved = study.saved_node(name, 0)
         assert saved["state"]["phase"] == "complete"
+        metadata = saved["model_metadata"]
+        assert metadata["width"] == study.config["width"]
+        actual_name = study.canonical(name)
+        metadata_path = study.node_path(actual_name, 0) / "model_metadata.json"
+        assert json.loads(metadata_path.read_text()) == metadata
+        if actual_name in {"g_rpn_original", "g_rpn_unified"}:
+            assert metadata["lower"]["width"] == study.config["autoregressive"]["width"]
+            assert metadata["lower"]["parameter_count"] > 0
+        if actual_name in {"g_random", "g_gp"}:
+            assert metadata["lower"]["parameter_count"] == 0
+            assert metadata["lower"]["width"] is None
         if definition.get("lower"):
             assert saved["state"]["generator_version"] > 0
         if definition.get("upper"):
@@ -352,7 +369,19 @@ def test_prepare_protocol_freezes_model_width(protocol, tmp_path, monkeypatch, w
     if width is not None:
         run_study(root / "protocol.json", study.output, [0], nodes=["p_new_dual"])
         assert study.saved_node("g_diffusion", 0)["state"]["lower_iteration"] == 1
-        assert study.saved_node("s_upper_ppo", 0)["state"]["upper_iteration"] == 1
+        saved = study.saved_node("s_upper_ppo", 0)
+        assert saved["state"]["upper_iteration"] == 1
+        metadata = saved["model_metadata"]
+        assert metadata["width"] == metadata["lower"]["width"] == metadata["upper"]["width"] == width
+        assert metadata["lower"]["parameter_count"] == sum(parameter.numel() for parameter in generator.policy.parameters())
+        assert metadata["upper"]["parameter_count"] == sum(parameter.numel() for parameter in selector.policy.parameters())
+        assert metadata["total_parameters"] == metadata["lower"]["parameter_count"] + metadata["upper"]["parameter_count"]
+        assert metadata["total_weight_bytes"] == 4 * metadata["total_parameters"]
+        assert metadata["lower"]["dtypes"] == metadata["upper"]["dtypes"] == ["float32"]
+        assert metadata["node"] == "s_upper_ppo" and metadata["training_seed"] == 0
+        node_root = study.node_path("s_upper_ppo", 0)
+        assert json.loads((node_root / "model_metadata.json").read_text()) == metadata
+        assert json.loads((node_root / "progress.json").read_text())["model_metadata"] == metadata
         # 重复运行同时核验大模型检查点及其优化器状态可被完整加载。
         run_study(root / "protocol.json", study.output, [0], nodes=["p_new_dual"])
 

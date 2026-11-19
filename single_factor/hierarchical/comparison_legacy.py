@@ -18,7 +18,7 @@ from .selection_search import CandidatePool
 def run_legacy(study, name, seed):
     """共享结构初始化后，运行原起点调度、原拟合期下层奖励与原 Ridge 工作池。"""
     from .__main__ import load_config
-    from .models import LowerPolicy, UpperPolicy
+    from .models import LowerPolicy, UpperPolicy, model_metadata
     from .training import Campaign, model_bundle
     from .comparison_study import REPOSITORY
     from .comparison_training import seed_all
@@ -55,6 +55,9 @@ def run_legacy(study, name, seed):
         seed_all(seed)
         lower = LowerPolicy(study.grammar, config["width"], config["corpus"]["noise_steps"], representation="rpn", edit_backend="rpn")
         upper = UpperPolicy(study.grammar, config["width"], representation="rpn")
+        metadata = {**model_metadata(lower, upper, config["width"]), "node": name, "training_seed": seed,
+                    "generator": "legacy_rpn_diffusion", "selector": "legacy_start_scheduler"}
+        save_json(root / "model_metadata.json", metadata)
         editor = {key[len("editor."):]: value for key, value in source["generator"]["policy"].items() if key.startswith("editor.")}
         lower.load_state_dict({key: editor[key] for key in lower.state_dict()})
         initializer = root / "syntax_initializer.pt"
@@ -75,8 +78,10 @@ def run_legacy(study, name, seed):
             "selector_training": stage_times.get("upper", 0.0), "total_training": perf_counter() - started,
             "shared_syntax": source["state"]["costs"]["syntax"]}, "generator_version": campaign.state["lower_iteration"],
             "selector_version": campaign.state["upper_iteration"]}
-        save_torch(root / "checkpoint.pt", {"identity": identity, "state": state, "bundle": bundle, "config": resolved})
-        save_json(root / "progress.json", {**state, "identity": identity, "architecture": "legacy_start_scheduler"})
+        save_torch(root / "checkpoint.pt", {"identity": identity, "state": state, "bundle": bundle, "config": resolved,
+                                           "model_metadata": metadata})
+        save_json(root / "progress.json", {**state, "identity": identity, "architecture": "legacy_start_scheduler",
+                                           "model_metadata": metadata})
 
 
 def evaluate_legacy(study, name, seed, split, selection_identity=None):

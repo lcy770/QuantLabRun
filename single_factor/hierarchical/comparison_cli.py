@@ -67,6 +67,8 @@ def run_study(protocol, output, seeds, nodes=None, groups=None):
         manifest["seeds_seen"] = sorted(set(manifest["seeds_seen"]) | set(seeds))
         manifest["requested_nodes"] = sorted(set(manifest["requested_nodes"]) | set(requested))
         manifest["comparison_split"] = study.comparison_split
+        manifest["width"] = study.config["width"]
+        manifest["rpn_width"] = study.config.get("autoregressive", {}).get("width", 128)
         save_json(manifest_path, manifest)
         copy_source_snapshot(study.output)
         for seed in seeds:

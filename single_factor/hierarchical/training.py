@@ -16,7 +16,7 @@ import torch
 from .ast import Edit, Grammar, Node, replace
 from .evaluation import Evaluator, load_task, normalize
 from .io import append_json, digest, event, save_json, save_torch, check_budget
-from .models import LowerPolicy, UpperPolicy
+from .models import LowerPolicy, UpperPolicy, model_metadata
 from .rpn import RPNKernel
 from .ppo import complete_returns, continuation_returns, update, gae_targets, immediate_targets
 from .search import Archive, episode, family
@@ -154,6 +154,7 @@ def model_bundle(lower, upper, config, **extra):
             "lower_position_context": lower.use_position,
             "grammar": lower.grammar.config(), "width": lower.width,
             "noise_steps": lower.noise_steps, "lower": lower.state_dict(), "upper": upper.state_dict(),
+            "model_metadata": model_metadata(lower, upper, lower.width),
             "configuration_hash": config["fingerprint"], **extra}
 
 
