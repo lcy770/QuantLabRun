@@ -97,7 +97,13 @@ def collect_proposal(generator, evaluator, observation, settings, seed, proposal
     device = getattr(generator, "device", None)
     if device is None:
         device = next(generator.parameters()).device
-    devices = [device.index] if device.type == "cuda" else []
+    devices = []
+    if device.type == "cuda":
+        # 配置中的默认cuda没有编号，fork_rng需要解析后的实际GPU编号。
+        index = device.index
+        if index is None:
+            index = torch.cuda.current_device()
+        devices = [index]
     with torch.random.fork_rng(devices=devices):
         torch.manual_seed(seed)
         started = perf_counter()

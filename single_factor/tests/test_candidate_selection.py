@@ -2,6 +2,8 @@
 import copy
 from dataclasses import replace
 import json
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -16,7 +18,9 @@ from single_factor.hierarchical.selection_evaluation import (
     member_deficiency, quality_score,
 )
 from single_factor.hierarchical.selection_models import GeneratorPolicy, SelectorPolicy
-from single_factor.hierarchical.selection_search import CandidatePool, ProposalCollector, StartBank, select_members
+from single_factor.hierarchical.selection_search import (
+    CandidatePool, ProposalCollector, StartBank, collect_proposal, select_members,
+)
 from single_factor.hierarchical.selection_training import SelectionCampaign, restore_selection_models
 
 
@@ -76,6 +80,65 @@ def config_file(tmp_path, workers=1, eta=0.0, pretrain=0):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config))
     return path
+
+
+@pytest.mark.parametrize("device_name, expected_devices", [
+    ("cpu", []), ("cuda", [2]), ("cuda:0", [0]), ("cuda:1", [1]),
+])
+def test_collect_proposal_rng_resolves_cuda_device(monkeypatch, device_name, expected_devices):
+    """默认CUDA解析当前编号，显式编号保留，并恢复提案前的随机状态。"""
+    current_device = Mock(return_value=2)
+    get_state = Mock(side_effect=lambda index: torch.tensor([index], dtype=torch.uint8))
+    restored_devices = []
+
+    def restore_state(state, device):
+        """记录实际恢复的设备，兼容Torch的位置参数和关键字参数调用。"""
+        restored_devices.append(device)
+
+    monkeypatch.setattr(torch.cuda, "current_device", current_device)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", get_state)
+    monkeypatch.setattr(torch.cuda, "set_rng_state", restore_state)
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", Mock())
+
+    def generate(observation, rng, steps, perturbation_steps, record):
+        """通过真实CPU随机流记录采样值，以核验上下文退出后的恢复。"""
+        return None, [{"index": 0, "draw": float(torch.rand(()))}], None
+
+    generator = SimpleNamespace(device=torch.device(device_name), generate=generate)
+    observation = SimpleNamespace(ids=())
+    settings = {"diffusion_steps": 1, "perturbation_steps": 0}
+    before = torch.get_rng_state().clone()
+    first = collect_proposal(generator, None, observation, settings, 42, "first")
+    assert torch.equal(torch.get_rng_state(), before)
+    second = collect_proposal(generator, None, observation, settings, 42, "second")
+    assert torch.equal(torch.get_rng_state(), before)
+    assert first["rows"] == second["rows"]
+    assert [call.args[0] for call in get_state.call_args_list] == expected_devices * 2
+    assert restored_devices == expected_devices * 2
+    assert current_device.call_count == (2 if device_name == "cuda" else 0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="需要CUDA设备")
+@pytest.mark.parametrize("device_name", ["cuda", "cuda:0"])
+def test_collect_proposal_cuda_backend_restores_rng(tmp_path, device_name):
+    """在GPU上通过实际扩散后端验证默认设备、重复采样和随机状态恢复。"""
+    from single_factor.hierarchical.__main__ import load_config
+    from single_factor.hierarchical.comparison_generators import DiffusionBackend
+
+    config = load_config(config_file(tmp_path))
+    config["device"] = device_name
+    generator = DiffusionBackend(grammar(), config)
+    evaluator = SelectionEvaluator(grammar(), load_selection_task(config["tasks"][0], config), config)
+    observation = StartBank([grammar().parse("volume")]).observe(evaluator, 4)
+    device = next(generator.policy.parameters()).device
+    cpu_before = torch.get_rng_state().clone()
+    cuda_before = torch.cuda.get_rng_state(device).clone()
+    first = collect_proposal(generator, evaluator, observation, config["lower"], 42, "first")
+    second = collect_proposal(generator, evaluator, observation, config["lower"], 42, "second")
+    assert torch.equal(torch.get_rng_state(), cpu_before)
+    assert torch.equal(torch.cuda.get_rng_state(device), cuda_before)
+    assert first["source_id"] == second["source_id"]
+    assert [row["logp"] for row in first["rows"]] == pytest.approx([row["logp"] for row in second["rows"]])
 
 
 def test_quality_deficiency_and_blocks_match_word_arithmetic():
