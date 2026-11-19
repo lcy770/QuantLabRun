@@ -81,13 +81,18 @@ def resolve_nodes(names=None, groups=None):
     return ordered, requested
 
 
-def prepare_protocol(cache, output, profile="short", device="auto", tasks=None, *, training_start=None, cutoff=None):
-    """生成本机解析配置，Git 中的模板及公式库保持相对路径。"""
+def prepare_protocol(cache, output, profile="short", device="auto", tasks=None, *, training_start=None, cutoff=None,
+                     width=None):
+    """生成冻结协议，可覆盖上下层网络宽度，原生自回归对照保留独立宽度。"""
+    if width is not None and (type(width) is not int or width < 1):
+        raise ValueError("width must be a positive integer")
     output = Path(output).resolve()
     if (output / "protocol.json").exists():
         raise FileExistsError("protocol already exists; use it unchanged or choose a new output")
     profiles = json.loads((TEMPLATES / "profiles.json").read_text(encoding="utf-8"))
     settings = profiles[profile]
+    if width is not None:
+        settings["width"] = width
     config = json.loads((TEMPLATES / "base.json").read_text(encoding="utf-8"))
     cache = Path(cache).resolve()
     if tasks is None:

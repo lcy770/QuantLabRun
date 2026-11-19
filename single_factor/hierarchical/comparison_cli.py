@@ -199,6 +199,7 @@ def main():
     prepare.add_argument("--output", required=True)
     prepare.add_argument("--profile", choices=("smoke", "short", "long"), default="short")
     prepare.add_argument("--device", default="auto")
+    prepare.add_argument("--width", type=int, help="覆盖上下层网络隐藏宽度；原生RPN PPO仍使用独立的rpn_width")
     prepare.add_argument("--tasks-config", help="explicit historical/test tasks for local smoke validation")
     prepare.add_argument("--training-start")
     prepare.add_argument("--end", help="information cutoff, defaults to the prepared panel end")
@@ -266,9 +267,12 @@ def main():
                         cache = Path(task[segment]["cache"])
                         if not cache.is_absolute():
                             task[segment]["cache"] = str((task_config.parent / cache).resolve())
-        date_options = {"training_start": args.training_start, "cutoff": args.end} if args.training_start or args.end else {}
-        result = prepare_protocol(args.cache, args.output, args.profile, args.device, tasks, **date_options)
-        result = {"protocol": str(Path(args.output).resolve() / "protocol.json"), "dates": result["dates"]}
+        overrides = {"training_start": args.training_start, "cutoff": args.end} if args.training_start or args.end else {}
+        if args.width is not None:
+            overrides["width"] = args.width
+        result = prepare_protocol(args.cache, args.output, args.profile, args.device, tasks, **overrides)
+        result = {"protocol": str(Path(args.output).resolve() / "protocol.json"), "width": result["config"]["width"],
+                  "dates": result["dates"]}
     elif args.command == "run":
         result = run_study(args.protocol, args.output, args.seeds, args.nodes, args.groups)
     elif args.command == "freeze":

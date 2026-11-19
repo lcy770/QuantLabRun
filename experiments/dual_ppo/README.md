@@ -171,6 +171,30 @@ python -m single_factor.hierarchical.comparison_cli run --protocol var/experimen
 
 long 使用独立初始化与完整长预算，short的训练期对比用于选择需要长训练的实验组。续训机制对比由 c_lower、c_upper、c_alternating 单独实现。
 
+### 扩大网络与容量对照
+
+`prepare --width` 覆盖实验共用的上下层隐藏宽度，并将实际宽度写入冻结协议。省略该参数时沿用原 profile。原生自回归 RPN PPO 仍使用 profile 中独立的 `rpn_width`，当前 long 为128。扩散下层、集合选择上层及相关神经网络对照使用覆盖后的宽度。
+
+| 隐藏宽度 | 扩散下层参数 | 集合选择上层参数 | 合计 |
+| --- | ---: | ---: | ---: |
+| 32 | 63,237 | 27,267 | 90,504 |
+| 64 | 237,061 | 101,635 | 338,696 |
+| 128 | 916,485 | 391,683 | 1,308,168 |
+| 256 | 3,602,437 | 1,537,027 | 5,139,464 |
+
+上表使用当前完整文法与4步编辑配置。参数更多不保证组合效果提高，需要在相同数据、训练种子和预算下对照。先检查扩大后的模型能否完成实际GPU更新，再启动长训练。下面先用128宽度检查自己的算法，依赖自动包含结构预训练与扩散下层；要试256时修改第一行。
+
+```powershell
+$taskWidth = 128
+$taskCapacityRoot = "var/experiments/capacity_w$taskWidth"
+python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_2025h2_2026 --output "$taskCapacityRoot/smoke_protocol" --profile smoke --device cuda --width $taskWidth
+python -m single_factor.hierarchical.comparison_cli run --protocol "$taskCapacityRoot/smoke_protocol/protocol.json" --output "$taskCapacityRoot/smoke_results" --seeds 0 --nodes p_new_dual
+python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_2025h2_2026 --output "$taskCapacityRoot/long_protocol" --profile long --device cuda --width $taskWidth
+python -m single_factor.hierarchical.comparison_cli run --protocol "$taskCapacityRoot/long_protocol/protocol.json" --output "$taskCapacityRoot/long_results" --seeds 0 1 2 --nodes p_new_dual
+```
+
+宽度改变会改变模型张量形状，需要新协议、新结果目录并从头训练，不能接续旧宽度检查点。更新源码也会改变协议身份；先停止旧训练再更新代码，保留其原结果和源码记录。确认主算法运行后，可在同一新协议、同一结果目录再次执行 `run` 并省略 `--nodes`，补齐完整对比，已完成模型与评价会复用。GPU显存还包含优化器、梯度、数据和计算中间结果，需在训练机实际检查。
+
 任务数N由实际数据截止日决定。long中每个生成器、每个训练种子的限时搜索预算为N×3×1800秒，另有固定尝试评价和模型训练。若形成19个任务，仅该项约28.5小时。1至2周内先完成short，再选择主要组长训。
 
 ## 断点恢复和结果
