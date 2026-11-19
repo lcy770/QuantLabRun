@@ -201,6 +201,47 @@ def test_client_parses_rows_and_keeps_password_out_of_url():
     assert opener.timeouts == [settings.timeout]
 
 
+@pytest.mark.parametrize("failure", ["content-length", "missing-footer", "server-error"])
+def test_parquet_download_handles_incomplete_and_late_error(failure, tmp_path, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from repositories import clickhouse as live_db
+
+    buffer = io.BytesIO()
+    pq.write_table(pa.table({"value": [1]}), buffer)
+    valid = buffer.getvalue()
+    damaged = valid[:-8]
+    headers = {"Content-Length": str(len(valid))} if failure == "content-length" else {}
+    if failure == "server-error":
+        damaged += b"\nCode: 241. DB::Exception: top-secret memory limit exceeded\n"
+
+    requests = []
+
+    class Opener:
+        def open(self, request, timeout):
+            requests.append(request)
+            response = io.BytesIO(damaged if len(requests) == 1 else valid)
+            response.headers = headers if len(requests) == 1 else {}
+            return response
+
+    monkeypatch.setattr(live_db.time, "sleep", lambda _: None)
+    client = live_db.ClickHouseHTTPClient(live_db.LiveDBSettings(password="top-secret"), opener=Opener())
+    target = tmp_path / "panel.parquet"
+    target.write_bytes(b"previous copy")
+    if failure == "server-error":
+        with pytest.raises(live_db.LiveDBQueryError, match="Code: 241") as excinfo:
+            client.query_to_file("SELECT value FROM t", target)
+        assert "top-secret" not in str(excinfo.value)
+        assert target.read_bytes() == b"previous copy"
+        assert len(requests) == 1
+    else:
+        assert client.query_to_file("SELECT value FROM t", target) == target
+        assert target.read_bytes() == valid
+        assert len(requests) == 2
+    assert all("wait_end_of_query=1" in request.full_url for request in requests)
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_client_maps_auth_failure_to_unavailable():
     from repositories import clickhouse as live_db
 

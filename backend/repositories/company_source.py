@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -1153,38 +1154,50 @@ def attach_derivatives(panel: pd.DataFrame, derivatives: Optional[pd.DataFrame])
     return merged.reset_index(drop=True)
 
 
-def _rewrite_dates(raw_path: Path, final_path: Path) -> None:
+def _rewrite_dates(raw_paths: Iterable[Path], final_path: Path) -> None:
     """把 ClickHouse 的 Date/DateTime 整数列重写成 Arrow timestamp。
 
     ClickHouse 的 Parquet writer 不给 Date/DateTime 写 logical type，PyArrow 会读成
     uint16/uint32；``single_factor.materialize_memmap`` 用 ``pd.Timestamp`` 过滤日期，
     必须显式转成 timestamp 列。
     """
-    reader = pq.ParquetFile(raw_path)
-    schema = reader.schema_arrow
-    targets = {"date", "ListedDate"}
-    converted = set()
-    fields: List[pa.Field] = []
-    for field in schema:
-        if field.name in targets and pa.types.is_integer(field.type):
-            fields.append(pa.field(field.name, pa.timestamp("s"), nullable=field.nullable))
-            converted.add(field.name)
-        else:
-            fields.append(field)
-    output_schema = pa.schema(fields, metadata=schema.metadata)
-    writer = pq.ParquetWriter(final_path, schema=output_schema, compression="zstd")
-    try:
-        for batch in reader.iter_batches(batch_size=200_000):
-            table = pa.Table.from_batches([batch], schema=schema)
-            for name in converted:
-                index = table.schema.get_field_index(name)
-                seconds = pc.multiply(pc.cast(table.column(index), pa.int64()), 86400)
-                table = table.set_column(
-                    index, pa.field(name, pa.timestamp("s")), pc.cast(seconds, pa.timestamp("s"))
-                )
-            writer.write_table(table.cast(output_schema))
-    finally:
-        writer.close()
+    with ExitStack() as stack:
+        writer = None
+        for raw_path in raw_paths:
+            # The caller owns this handle even if PyArrow fails while opening bad metadata.
+            with raw_path.open("rb") as source, pq.ParquetFile(source) as reader:
+                schema = reader.schema_arrow
+                converted = {field.name for field in schema if field.name in {"date", "ListedDate"}
+                             and pa.types.is_integer(field.type)}
+                fields = [field.with_type(pa.timestamp("s")) if field.name in converted else field
+                          for field in schema]
+                output_schema = pa.schema(fields, metadata=schema.metadata)
+                if writer is None:
+                    writer = stack.enter_context(pq.ParquetWriter(final_path, output_schema, compression="zstd"))
+                elif not output_schema.equals(writer.schema):
+                    raise ValueError("ClickHouse returned different schemas for the panel date windows")
+                for batch in reader.iter_batches(batch_size=200_000):
+                    table = pa.Table.from_batches([batch], schema=schema)
+                    for name in converted:
+                        index = table.schema.get_field_index(name)
+                        seconds = pc.multiply(pc.cast(table.column(index), pa.int64()), 86400)
+                        table = table.set_column(index, output_schema.field(index), pc.cast(seconds, pa.timestamp("s")))
+                    writer.write_table(table.cast(output_schema))
+
+
+def _panel_windows(start: Any, end: Any, *, split: bool) -> Iterable[Tuple[Any, Any]]:
+    """日期有界的公司快照按月份下载，每段首尾相接，原有面板入口维持单次查询。"""
+    if not split or start is None or end is None:
+        yield start, end
+        return
+    first = pd.Timestamp(_ymd(start, "start_date"))
+    last = pd.Timestamp(_ymd(end, "end_date"))
+    if first > last:
+        raise ValueError("panel start_date must not be after end_date")
+    while first <= last:
+        stop = min(first + pd.offsets.MonthEnd(0), last)
+        yield first, stop
+        first = stop + pd.Timedelta(days=1)
 
 
 def write_pool_panel(
@@ -1245,21 +1258,25 @@ def write_pool_panel(
         raise ValueError(f"unsupported derivative fields: {unknown}")
     settings = settings or live_db.resolve_settings()
     client = live_db._client(settings, client)
-    panel_path = Path(output_path).expanduser().resolve()
-    panel_path.parent.mkdir(parents=True, exist_ok=True)
-    panel_path.unlink(missing_ok=True)
-    raw_path = panel_path.with_name(panel_path.name + ".raw.parquet")
-    raw_path.unlink(missing_ok=True)
-    written = False
-    try:
-        client.query_to_file(
-            build_panel_sql(codes, daily_fields, start_date, end_date, category=category),
-            raw_path,
-            timeout=settings.panel_timeout,
-            max_execution_time=settings.panel_max_execution_time,
-            max_memory_usage=settings.panel_max_memory,
-        )
-        _rewrite_dates(raw_path, panel_path)
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".panel-", dir=output.parent, ignore_cleanup_errors=True) as staged:
+        panel_path = Path(staged) / "panel.parquet"
+        raw_path = Path(staged) / "raw.parquet"
+
+        def download_parts() -> Iterable[Path]:
+            for start, end in _panel_windows(start_date, end_date, split=category is not None):
+                try:
+                    client.query_to_file(
+                        build_panel_sql(codes, daily_fields, start, end, category=category), raw_path,
+                        timeout=settings.panel_timeout, max_execution_time=settings.panel_max_execution_time,
+                        max_memory_usage=settings.panel_max_memory,
+                    )
+                except live_db.LiveDBError as exc:
+                    raise type(exc)(f"行情窗口 {start} 至 {end}：{exc}") from None
+                yield raw_path
+
+        _rewrite_dates(download_parts(), panel_path)
         if fund_fields or val_fields or deriv_fields:
             if start_date is None or end_date is None:
                 raise ValueError("fundamental/valuation/derivative fields require start_date and end_date")
@@ -1288,13 +1305,9 @@ def write_pool_panel(
         if dates.empty:
             raise ValueError("no rows remain for the requested pool panel")
         n_stocks = pc.count_distinct(table.column("code")).as_py()
-        written = True
-    finally:
-        raw_path.unlink(missing_ok=True)
-        if not written:
-            panel_path.unlink(missing_ok=True)
+        panel_path.replace(output)
     return {
-        "panel_path": str(panel_path),
+        "panel_path": str(output),
         "fields": selected,
         "rows": int(rows),
         "n_stocks": int(n_stocks),

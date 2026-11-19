@@ -437,7 +437,7 @@ def test_rewrite_dates_turns_integer_days_into_timestamps(tmp_path):
         raw,
     )
 
-    company_source._rewrite_dates(raw, final)
+    company_source._rewrite_dates([raw], final)
 
     frame = pd.read_parquet(final)
     assert str(frame["date"].dtype).startswith("datetime64")
@@ -503,6 +503,22 @@ def test_write_pool_panel_removes_empty_output(tmp_path):
         )
     assert not output.exists()
     assert not output.with_name(output.name + ".raw.parquet").exists()
+
+
+def test_write_pool_panel_closes_invalid_input_and_keeps_existing_output(tmp_path):
+    class BrokenClient:
+        def query_to_file(self, sql, path, **kwargs):
+            path.write_bytes(b"PAR1" + b"partial" * 5)
+            return path
+
+    output = tmp_path / "panel.parquet"
+    output.write_bytes(b"previous copy")
+    with pytest.raises(pa.ArrowInvalid, match="Parquet magic bytes"):
+        company_source.write_pool_panel(
+            ["000001"], ["close"], output, settings=_settings(), client=BrokenClient()
+        )
+    assert output.read_bytes() == b"previous copy"
+    assert list(tmp_path.iterdir()) == [output]
 
 
 def test_load_panel_normalizes_clickhouse_types():

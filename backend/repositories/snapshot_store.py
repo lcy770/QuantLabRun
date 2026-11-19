@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
+from tempfile import TemporaryDirectory
 import time
 from uuid import uuid4
 
@@ -153,9 +153,8 @@ def create_or_reuse_snapshot(codes, fields, start_date, end_date, *, pool_id,
             if matches:
                 latest = max(matches, key=lambda item: item["created_at"])
                 return _verify(latest["snapshot_id"], root)
-        temporary = root / (".building-" + uuid4().hex)
-        temporary.mkdir()
-        try:
+        with TemporaryDirectory(prefix=".building-", dir=root, ignore_cleanup_errors=True) as staged:
+            temporary = Path(staged)
             panel_path = temporary / "panel.parquet"
             company_source.write_pool_panel(codes, fields, panel_path, request["start_date"], request["end_date"],
                                             category=category)
@@ -186,9 +185,6 @@ def create_or_reuse_snapshot(codes, fields, start_date, end_date, *, pool_id,
             (temporary / "checksums.json").write_text(json.dumps(checksums, indent=2), encoding="utf-8")
             temporary.rename(root / snapshot_id)
             return manifest
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary)
 
 
 def snapshot_stats(*, snapshot_root=None) -> dict:

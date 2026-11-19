@@ -30,7 +30,9 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from http.client import IncompleteRead
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from repositories.local_store import normalize_code  # 复用：代码统一成 6 位字符串
@@ -87,6 +89,10 @@ class LiveDBUnavailable(LiveDBError):
 
 class LiveDBQueryError(LiveDBError):
     """连上了但查询本身失败。"""
+
+
+class _IncompleteParquet(OSError):
+    """响应没有完整传输，可以重试同一查询。"""
 
 
 # ---------- SQL（全部为模块常量，任何请求参数都不拼进来） ----------
@@ -464,39 +470,66 @@ class ClickHouseHTTPClient:
             default_format="Parquet",
             max_execution_time=max_execution_time,
             max_memory_usage=max_memory_usage,
+            wait_end_of_query=True,
         )
         target = Path(path).expanduser().resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
-        part = target.with_name(target.name + ".part")
         settings = self.settings
         effective_timeout = settings.timeout if timeout is None else timeout
         last_error: Optional[BaseException] = None
-        for attempt in (1, 2):
-            try:
-                with self._opener.open(request, timeout=effective_timeout) as response:
-                    with part.open("wb") as handle:
-                        shutil.copyfileobj(response, handle, length=1 << 20)
-                os.replace(part, target)
-                return target
-            except urllib.error.HTTPError as exc:
-                part.unlink(missing_ok=True)
-                # HTTPError 是 URLError 的子类，必须先捕获；超时与 4xx/5xx 不重试
-                raise self._http_error(exc) from None
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                part.unlink(missing_ok=True)
-                reason = getattr(exc, "reason", None) or exc
-                if isinstance(reason, TimeoutError) or "timed out" in str(exc).lower():
-                    raise LiveDBUnavailable(
-                        f"ClickHouse 查询超时（{settings.display}，超过 {effective_timeout:.0f} 秒）"
-                    ) from None
-                last_error = exc
+        with TemporaryDirectory(prefix=".parquet-", dir=target.parent, ignore_cleanup_errors=True) as staged:
+            part = Path(staged) / "response.parquet"
+            for attempt in (1, 2):
+                try:
+                    with self._opener.open(request, timeout=effective_timeout) as response:
+                        headers = response.headers
+                        with part.open("wb") as handle:
+                            shutil.copyfileobj(response, handle, length=1 << 20)
+                    self._verify_parquet_response(part, headers)
+                except urllib.error.HTTPError as exc:
+                    with exc:
+                        last_error = self._http_error(exc)
+                    if exc.code not in (502, 503, 504):
+                        raise last_error from None
+                except (urllib.error.URLError, IncompleteRead, OSError) as exc:
+                    last_error = exc
+                else:
+                    os.replace(part, target)
+                    return target
                 if attempt == 1:
                     time.sleep(0.5)
-                    continue
+        if isinstance(last_error, LiveDBError):
+            raise last_error from None
+        reason = getattr(last_error, "reason", None) or last_error
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            raise LiveDBUnavailable(
+                f"ClickHouse 查询超时（{settings.display}，超过 {effective_timeout:.0f} 秒）"
+            ) from None
         raise LiveDBUnavailable(
-            f"无法连接 ClickHouse {settings.display}（{self._redact(str(last_error))}）；"
-            "实时数据需要在公司网络环境下访问"
+            f"ClickHouse Parquet 下载失败（{settings.display}）：{self._redact(str(last_error))}"
         ) from None
+
+    def _verify_parquet_response(self, path: Path, headers: Mapping[str, str]) -> None:
+        size = path.stat().st_size
+        advertised = headers.get("Content-Length")
+        if advertised and not headers.get("Transfer-Encoding") and advertised.isdecimal() and size != int(advertised):
+            raise _IncompleteParquet(f"响应只有 {size} 字节，预期 {advertised} 字节")
+        with path.open("rb") as handle:
+            magic = handle.read(4)
+            handle.seek(max(0, size - 4096))
+            tail = handle.read()
+        exception_code = headers.get("X-ClickHouse-Exception-Code", "0")
+        has_exception = exception_code != "0"
+        if magic == b"PAR1" and not has_exception and size >= 12 and tail.endswith(b"PAR1"):
+            footer_size = int.from_bytes(tail[-8:-4], "little")
+            if 0 < footer_size <= size - 12:
+                return
+        # ClickHouse can append an exception to an already-started HTTP 200 response.
+        detail = re.search(rb"Code: \d+\. DB::Exception:[^\r\n]*", tail)
+        if detail or has_exception:
+            message = detail.group().decode("utf-8", "replace") if detail else f"Code: {exception_code}"
+            raise LiveDBQueryError(f"ClickHouse 查询失败（HTTP 200）：{self._redact(message)[:200]}")
+        raise _IncompleteParquet(f"响应缺少有效的 Parquet 文件头或文件尾（已收到 {size} 字节）")
 
     def _request(
         self,
@@ -505,24 +538,23 @@ class ClickHouseHTTPClient:
         default_format: str = "JSONEachRow",
         max_execution_time: Optional[int] = None,
         max_memory_usage: Optional[int] = None,
+        wait_end_of_query: bool = False,
     ) -> urllib.request.Request:
         statement = guard_readonly(sql)
         settings = self.settings
-        params = urllib.parse.urlencode(
-            {
-                "default_format": default_format,
-                "max_execution_time": (
-                    settings.max_execution_time
-                    if max_execution_time is None
-                    else max_execution_time
-                ),
-                "max_memory_usage": (
-                    settings.max_memory_usage if max_memory_usage is None else max_memory_usage
-                ),
-            }
-        )
+        params = {
+            "default_format": default_format,
+            "max_execution_time": (
+                settings.max_execution_time if max_execution_time is None else max_execution_time
+            ),
+            "max_memory_usage": (
+                settings.max_memory_usage if max_memory_usage is None else max_memory_usage
+            ),
+        }
+        if wait_end_of_query:
+            params["wait_end_of_query"] = 1
         request = urllib.request.Request(
-            f"{settings.endpoint}?{params}",
+            f"{settings.endpoint}?{urllib.parse.urlencode(params)}",
             data=statement.encode("utf-8"),
             method="POST",
         )

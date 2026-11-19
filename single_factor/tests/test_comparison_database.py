@@ -1,12 +1,13 @@
 """核验数据库快照入口、最新日期划分及20日标签，行情为合成数据。"""
 import json
+import re
 
 import exchange_calendars as calendars
 import numpy as np
 import pandas as pd
 import pytest
 
-from repositories import clickhouse, company_source, snapshot_store
+from repositories import clickhouse, snapshot_store
 from single_factor.hierarchical import comparison_cli, comparison_data
 from single_factor.hierarchical.io import save_json
 
@@ -45,6 +46,8 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day, a
     codes_path = tmp_path / "codes.json"
     save_json(codes_path, codes)
     queries, captures = [], []
+    dates = calendars.get_calendar("XSHG", start="2025-01-27", end="2026-11-16").sessions.tz_localize(None)
+    fields = [*comparison_data.FIELDS, "ycp", "Ifsuspend", "if_up", "if_down"]
 
     def query(client, sql):
         """模拟最新日期和不设名单上限的全市场代码查询。"""
@@ -56,21 +59,20 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day, a
             return [{"code": code} for code in reversed(codes)]
         return [{"date_max": "2026-11-16"}]
 
-    def capture(stock_codes, fields, output, start, end, *, category):
-        """输出覆盖交易日的合成源快照，缺日分支用于验证拒绝不完整数据。"""
-        dates = calendars.get_calendar("XSHG", start=start, end=end).sessions.tz_localize(None)
+    def capture(client, sql, output, **kwargs):
+        """按实际日期窗口返回合成 Parquet，从 HTTP 下载边界继续运行整个物化流程。"""
+        lower, upper = re.findall(r"d\.timestamps (?:>=|<) '(\d{4}-\d{2}-\d{2})'", sql)
+        start, before = pd.Timestamp(lower), pd.Timestamp(upper)
+        captures.append((start, before))
+        assert "d.category = 'stock'" in sql and re.findall(r"'([0-9]{6})'", sql) == codes
+        assert start.month == (before - pd.Timedelta(days=1)).month
+        window = dates[(dates >= start) & (dates < before)]
         if missing_day:
-            dates = dates.delete(110)
-        captures.append((start, end))
-        assert category == "stock" and list(stock_codes) == codes
-        panel_sql = company_source.build_panel_sql(stock_codes, fields, start, end, category=category)
-        assert "d.category = 'stock'" in panel_sql
-        assert "d.timestamps >= '2025-01-27'" in panel_sql
-        assert "d.timestamps < '2026-11-17'" in panel_sql
-        index = pd.MultiIndex.from_product([dates, stock_codes], names=["date", "code"])
+            window = window[window != dates[110]]
+        index = pd.MultiIndex.from_product([window, codes], names=["date", "code"])
         frame = index.to_frame(index=False)
-        t = np.repeat(np.arange(len(dates)), len(stock_codes))
-        offset = np.tile(np.arange(len(stock_codes)), len(dates)) * 10.0
+        t = np.repeat(dates.get_indexer(window), len(codes))
+        offset = np.tile(np.arange(len(codes)), len(window)) * 10.0
         for field in fields:
             frame[field] = 100.0 + t + offset if field in {"open", "close", "high", "low"} else 1.0
         frame["ycp"] = 99.0 + t + offset
@@ -81,7 +83,7 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day, a
 
     monkeypatch.setattr(clickhouse, "resolve_settings", lambda: clickhouse.LiveDBSettings(password="test"))
     monkeypatch.setattr(clickhouse.ClickHouseHTTPClient, "query", query)
-    monkeypatch.setattr(company_source, "write_pool_panel", capture)
+    monkeypatch.setattr(clickhouse.ClickHouseHTTPClient, "query_to_file", capture)
     monkeypatch.setattr(comparison_data, "latest_completed_session", lambda: "2026-11-16")
     output, root = tmp_path / "panel", tmp_path / "snapshots"
     argv = ["comparison_cli", "prepare-panel", "--output", str(output), "--snapshot-root", str(root)]
@@ -114,7 +116,10 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day, a
     assert labels[0, 0] == pytest.approx(120 / 100 - 1)
     assert np.searchsorted(dates, np.datetime64("2025-07-01")) == 100
     assert len(queries) == (2 if all_stocks else 1)
-    assert len(captures) == 1
+    assert len(captures) == 23
+    assert captures[0][0] == pd.Timestamp("2025-01-27")
+    assert captures[-1][1] == pd.Timestamp("2026-11-17")
+    assert all(previous[1] == current[0] for previous, current in zip(captures, captures[1:]))
 
     def offline():
         """离线复用时，配置和查询均不应再次触发。"""
