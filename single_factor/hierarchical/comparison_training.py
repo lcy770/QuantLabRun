@@ -307,7 +307,8 @@ class NodeRunner:
             np.random.set_state(saved["numpy_rng"])
             torch.set_rng_state(saved["torch_rng"].cpu())
             if saved["cuda_rng"] and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(saved["cuda_rng"])
+                # map_location可能搬动随机状态，CUDA恢复接口要求CPU字节张量。
+                torch.cuda.set_rng_state_all([state.cpu() for state in saved["cuda_rng"]])
         else:
             if "generator_source" in dependencies:
                 source = dependencies["generator_source"]

@@ -1,5 +1,6 @@
 """新分工的公式、因果边界、实际梯度与正常入口端到端回归。"""
 import copy
+from contextlib import nullcontext
 from dataclasses import replace
 import json
 from types import SimpleNamespace
@@ -89,6 +90,9 @@ def test_collect_proposal_rng_resolves_cuda_device(monkeypatch, device_name, exp
     """默认CUDA解析当前编号，显式编号保留，并恢复提案前的随机状态。"""
     current_device = Mock(return_value=2)
     get_state = Mock(side_effect=lambda index: torch.tensor([index], dtype=torch.uint8))
+    seed_all_cuda = Mock()
+    seed_cuda = Mock()
+    cuda_context = Mock(side_effect=lambda index: nullcontext())
     restored_devices = []
 
     def restore_state(state, device):
@@ -98,7 +102,9 @@ def test_collect_proposal_rng_resolves_cuda_device(monkeypatch, device_name, exp
     monkeypatch.setattr(torch.cuda, "current_device", current_device)
     monkeypatch.setattr(torch.cuda, "get_rng_state", get_state)
     monkeypatch.setattr(torch.cuda, "set_rng_state", restore_state)
-    monkeypatch.setattr(torch.cuda, "manual_seed_all", Mock())
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", seed_all_cuda)
+    monkeypatch.setattr(torch.cuda, "manual_seed", seed_cuda)
+    monkeypatch.setattr(torch.cuda, "device", cuda_context)
 
     def generate(observation, rng, steps, perturbation_steps, record):
         """通过真实CPU随机流记录采样值，以核验上下文退出后的恢复。"""
@@ -116,15 +122,19 @@ def test_collect_proposal_rng_resolves_cuda_device(monkeypatch, device_name, exp
     assert [call.args[0] for call in get_state.call_args_list] == expected_devices * 2
     assert restored_devices == expected_devices * 2
     assert current_device.call_count == (2 if device_name == "cuda" else 0)
+    assert [call.args[0] for call in cuda_context.call_args_list] == expected_devices * 2
+    assert seed_cuda.call_count == (2 if expected_devices else 0)
+    seed_all_cuda.assert_not_called()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="需要CUDA设备")
 @pytest.mark.parametrize("device_name", ["cuda", "cuda:0"])
-def test_collect_proposal_cuda_backend_restores_rng(tmp_path, device_name):
+def test_collect_proposal_cuda_backend_restores_rng(tmp_path, monkeypatch, device_name):
     """在GPU上通过实际扩散后端验证默认设备、重复采样和随机状态恢复。"""
     from single_factor.hierarchical.__main__ import load_config
     from single_factor.hierarchical.comparison_generators import DiffusionBackend
 
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     config = load_config(config_file(tmp_path))
     config["device"] = device_name
     generator = DiffusionBackend(grammar(), config)

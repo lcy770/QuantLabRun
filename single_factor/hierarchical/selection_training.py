@@ -118,7 +118,8 @@ class SelectionCampaign:
             np.random.set_state(saved["numpy_rng"])
             torch.set_rng_state(saved["torch_rng"].cpu())
             if saved["cuda_rng"] and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(saved["cuda_rng"])
+                # map_location可能搬动随机状态，CUDA恢复接口要求CPU字节张量。
+                torch.cuda.set_rng_state_all([state.cpu() for state in saved["cuda_rng"]])
 
     def _initial_formulas(self):
         """读取可追溯初始库或从固定文法采样合法唯一公式。"""
@@ -395,9 +396,13 @@ class SelectionCampaign:
                 for method in evaluation["methods"]:
                     selection_started = perf_counter()
                     combination_before = evaluator.combination_seconds
-                    with torch.random.fork_rng(devices=([next(self.upper.parameters()).device.index]
-                                                      if next(self.upper.parameters()).device.type == "cuda" else [])):
-                        torch.manual_seed(seed)
+                    device = next(self.upper.parameters()).device
+                    devices = [device.index] if device.type == "cuda" else []
+                    with torch.random.fork_rng(devices=devices):
+                        torch.random.default_generator.manual_seed(seed)
+                        if devices:
+                            with torch.cuda.device(devices[0]):
+                                torch.cuda.manual_seed(seed)
                         segment = "feedback" if "feedback" in evaluator.panels else "validation"
                         rows, indices, score, contributions = select_members(self.upper, observation, evaluator, candidates,
                             method=method, rng=random.Random(seed), deterministic=evaluation["deterministic"], segment=segment)

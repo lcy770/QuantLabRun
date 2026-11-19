@@ -105,7 +105,11 @@ def collect_proposal(generator, evaluator, observation, settings, seed, proposal
             index = torch.cuda.current_device()
         devices = [index]
     with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(seed)
+        # 仅重置本提案使用的随机流，CPU基线也能保持GPU随机状态隔离。
+        torch.random.default_generator.manual_seed(seed)
+        if devices:
+            with torch.cuda.device(devices[0]):
+                torch.cuda.manual_seed(seed)
         started = perf_counter()
         final, rows, source = generator.generate(observation, random.Random(seed), settings["diffusion_steps"],
                                                 settings["perturbation_steps"], record)

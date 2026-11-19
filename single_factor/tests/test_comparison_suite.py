@@ -1,7 +1,9 @@
 """实验正常入口、真实学习器、交易记账及跨机数据传输的工程验收。"""
 import json
 from pathlib import Path
+import random
 import zipfile
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -53,6 +55,96 @@ def protocol(tmp_path):
     protocol_path = tmp_path / "protocol.json"
     save_json(protocol_path, result)
     return protocol_path
+
+
+@pytest.mark.parametrize("entry_point", ["comparison", "selection", "legacy"])
+def test_resume_normalizes_cuda_rng_states_to_cpu(protocol, tmp_path, monkeypatch, entry_point):
+    """模拟检查点映射到GPU后，三个恢复入口均先还原CPU随机状态张量。"""
+    from single_factor.hierarchical.comparison_training import NodeRunner
+    from single_factor.hierarchical.selection_training import SelectionCampaign
+    from single_factor.hierarchical.training import Campaign
+    from single_factor.tests.test_hierarchical_search import tiny_training_config
+
+    output = tmp_path / "restore_rng"
+    if entry_point == "comparison":
+        study = Study(protocol, output)
+        create = lambda: NodeRunner(study, "syntax", 0)
+        original = create()
+        checkpoint = original.root / "checkpoint.pt"
+    else:
+        if entry_point == "selection":
+            config = load_selection_config(protocol.with_name("config.json"))
+            campaign_type = SelectionCampaign
+        else:
+            config_root = tmp_path / "legacy_config"
+            config_root.mkdir()
+            config = tiny_training_config(config_root)
+            campaign_type = Campaign
+        original = campaign_type(config, output)
+        create = lambda: campaign_type(config, output, resume=True)
+        checkpoint = output / "training_state.pt"
+    original.commit()
+    if getattr(original, "collector", None):
+        original.collector.close()
+    original_load = torch.load
+    cpu_state = torch.zeros(8, dtype=torch.uint8)
+    gpu_mapped_state = Mock()
+    gpu_mapped_state.cpu.return_value = cpu_state
+    restore_cuda = Mock()
+
+    def load_mapped_rng(path, *args, **kwargs):
+        """保持真实检查点加载，仅模拟CUDA随机状态被map_location搬到GPU。"""
+        saved = original_load(path, *args, **kwargs)
+        if Path(path) == checkpoint:
+            saved["cuda_rng"] = [gpu_mapped_state]
+        return saved
+
+    monkeypatch.setattr(torch, "load", load_mapped_rng)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", Mock())
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", restore_cuda)
+    restored = create()
+    try:
+        gpu_mapped_state.cpu.assert_called_once_with()
+        restore_cuda.assert_called_once()
+        assert restore_cuda.call_args.args[0][0] is cpu_state
+    finally:
+        if getattr(restored, "collector", None):
+            restored.collector.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="需要CUDA设备")
+def test_cuda_checkpoint_resume_preserves_rng_and_optimizer(protocol, tmp_path, monkeypatch):
+    """在真实GPU上完成预训练、保存与恢复，并核验后续CPU/CUDA随机流。"""
+    from single_factor.hierarchical.comparison_training import NodeRunner
+    from single_factor.hierarchical.training import create_corpus
+
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    config_path = protocol.with_name("config.json")
+    config = json.loads(config_path.read_text())
+    config["device"] = "cuda"
+    save_json(config_path, config)
+    definition = json.loads(protocol.read_text())
+    definition["config"] = load_selection_config(config_path)
+    definition["fingerprint"] = digest({key: value for key, value in definition.items() if key != "fingerprint"})
+    save_json(protocol, definition)
+    study = Study(protocol, tmp_path / "gpu_resume")
+    original = NodeRunner(study, "syntax", 0)
+    original.run()
+    expected_cpu = torch.rand(4)
+    expected_cuda = torch.rand(4, device="cuda")
+    restored = NodeRunner(study, "syntax", 0)
+    assert torch.equal(torch.rand(4), expected_cpu)
+    assert torch.equal(torch.rand(4, device="cuda"), expected_cuda)
+    old_optimizer = original.generator.syntax_optimizer.state_dict()
+    new_optimizer = restored.generator.syntax_optimizer.state_dict()
+    assert old_optimizer["state"] and old_optimizer["param_groups"] == new_optimizer["param_groups"]
+    for parameter, state in old_optimizer["state"].items():
+        for name, value in state.items():
+            assert torch.equal(new_optimizer["state"][parameter][name].cpu(), value.cpu())
+    records = create_corpus(study.grammar, study.config["corpus"], restored.root, "rpn")
+    metrics = restored.generator.pretrain(records, random.Random(42))
+    assert np.isfinite(metrics["train_nll"])
 
 
 @pytest.mark.parametrize("comparison_scope", ["development", "training"])
