@@ -64,7 +64,9 @@ def test_database_cli_and_offline_snapshot(tmp_path, monkeypatch, missing_day, a
         captures.append((start, end))
         assert category == "stock" and list(stock_codes) == codes
         panel_sql = company_source.build_panel_sql(stock_codes, fields, start, end, category=category)
-        assert "d.category = 'stock'" in panel_sql and "d.timestamps < addDays(toDate('2026-11-16'), 1)" in panel_sql
+        assert "d.category = 'stock'" in panel_sql
+        assert "d.timestamps >= '2025-01-27'" in panel_sql
+        assert "d.timestamps < '2026-11-17'" in panel_sql
         index = pd.MultiIndex.from_product([dates, stock_codes], names=["date", "code"])
         frame = index.to_frame(index=False)
         t = np.repeat(np.arange(len(dates)), len(stock_codes))

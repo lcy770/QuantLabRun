@@ -422,9 +422,13 @@ def build_panel_sql(
     if start is not None:
         where_parts.append(f"d.timestamps >= {_quote(_ymd(start, 'start_date'))}")
     if end is not None:
-        end_day = _quote(_ymd(end, 'end_date'))
-        where_parts.append(f"d.timestamps < addDays(toDate({end_day}), 1)" if category is not None
-                           else f"d.timestamps <= {end_day}")
+        end_day = _ymd(end, "end_date")
+        if category is not None:
+            # Company timestamps are strings. Match the stock discovery query's exclusive string bound.
+            next_day = (pd.Timestamp(end_day) + pd.Timedelta(days=1)).date().isoformat()
+            where_parts.append(f"d.timestamps < {_quote(next_day)}")
+        else:
+            where_parts.append(f"d.timestamps <= {_quote(end_day)}")
     if category is not None:
         where_parts.append(f"d.category = {_quote(category)}")
     where_parts.append(f"d.code IN {_code_list_sql(codes)}")
