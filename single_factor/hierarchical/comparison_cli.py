@@ -237,6 +237,14 @@ def main():
         sub.add_argument("--output", required=True)
         if command == "summarize":
             sub.add_argument("--split", choices=("training", "development", "test"))
+    extend = commands.add_parser("extend", help="继承已有模型、优化器和进度，追加训练时间")
+    extend.add_argument("--protocol", required=True, help="上一轮protocol.json")
+    extend.add_argument("--source", required=True, help="上一轮结果目录")
+    extend.add_argument("--output", required=True, help="本轮独立输出目录")
+    extend.add_argument("--node", required=True)
+    extend.add_argument("--seed", type=int, default=0)
+    extend.add_argument("--hours", type=float, required=True, help="从已有进度再追加的训练小时数")
+    extend.add_argument("--train-only", action="store_true")
     for command in ("pack-data", "unpack-data"):
         sub = commands.add_parser(command)
         sub.add_argument("--cache", required=True)
@@ -282,6 +290,10 @@ def main():
                   "dates": result["dates"]}
     elif args.command == "run":
         result = run_study(args.protocol, args.output, args.seeds, args.nodes, args.groups, train_only=args.train_only)
+    elif args.command == "extend":
+        from .comparison_resume import extend_study
+        result = extend_study(args.protocol, args.source, args.output, args.node, args.seed, args.hours,
+                              train_only=args.train_only)
     elif args.command == "freeze":
         result = freeze_selection(args.protocol, args.output, args.nodes, args.seeds, args.selection)
     elif args.command == "evaluate":

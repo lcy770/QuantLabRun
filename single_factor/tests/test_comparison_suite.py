@@ -422,6 +422,122 @@ def test_train_only_then_evaluate_reuses_models(protocol, tmp_path, monkeypatch)
     assert {path: file_hash(path) for path in hashes} == hashes
 
 
+def test_extend_preserves_learning_state_and_supports_multiple_rounds(protocol, tmp_path, monkeypatch):
+    """到期及中断均能接续，继承优化器和随机流，旧模型与评价保持不变。"""
+    import sys
+    from single_factor.hierarchical import comparison_cli, selection_config
+    from single_factor.hierarchical.comparison_resume import extend_study
+    from single_factor.hierarchical.comparison_training import NodeRunner
+    from single_factor.hierarchical.io import BudgetExpired
+
+    source = tmp_path / "source_results"
+    run_study(protocol, source, [0], nodes=["c_alternating"], train_only=True)
+    checkpoint = source / "seed_0/nodes/c_alternating/checkpoint.pt"
+    original = torch.load(checkpoint, weights_only=False)
+    original_hash = selection_config.file_hash(checkpoint)
+    output = tmp_path / "round_1"
+    run = NodeRunner.run
+
+    def interrupted(runner):
+        """模拟状态复制完成后退出，本轮重试必须从同一预算和检查点恢复。"""
+        if runner.name == "c_alternating":
+            raise BudgetExpired("simulated interruption")
+        return run(runner)
+
+    actual_hash = selection_config.file_hash
+
+    def upgraded_source(path):
+        """模拟仅源码版本升级，数据、奖励及网络配置保持完全相同。"""
+        value = actual_hash(path)
+        return digest([value, "upgrade"]) if Path(path).name == "comparison_resume.py" else value
+
+    monkeypatch.setattr(selection_config, "file_hash", upgraded_source)
+    with monkeypatch.context() as guard:
+        guard.setattr(NodeRunner, "run", interrupted)
+        guard.setattr(sys, "argv", ["comparison_cli", "extend", "--protocol", str(protocol),
+            "--source", str(source), "--output", str(output), "--node", "c_alternating",
+            "--seed", "0", "--hours", "1e-9", "--train-only"])
+        with pytest.raises(BudgetExpired, match="simulated interruption"):
+            comparison_cli.main()
+    child_protocol = output / "protocol/protocol.json"
+    child_checkpoint = output / "results/seed_0/nodes/c_alternating/checkpoint.pt"
+    copied = torch.load(child_checkpoint, weights_only=False)
+    assert copied["state"]["phase"] == "continuation"
+    assert copied["state"]["continuation_iteration"] == original["state"]["continuation_iteration"]
+    assert copied["state"]["history"] == original["state"]["history"]
+    for side in ("generator", "selector"):
+        for key, tensor in original[side]["policy"].items():
+            assert torch.equal(copied[side]["policy"][key], tensor)
+        assert copied[side]["optimizer"]["param_groups"] == original[side]["optimizer"]["param_groups"]
+        for parameter, values in original[side]["optimizer"]["state"].items():
+            for key, value in values.items():
+                assert torch.equal(copied[side]["optimizer"]["state"][parameter][key], value)
+    assert copied["python_rng"] == original["python_rng"]
+    assert np.array_equal(copied["numpy_rng"][1], original["numpy_rng"][1])
+    assert torch.equal(copied["torch_rng"], original["torch_rng"])
+    child = json.loads(child_protocol.read_text())
+    assert child["config"]["implementation_hash"] != json.loads(protocol.read_text())["config"]["implementation_hash"]
+    assert child["continuation"]["previous_seconds"] == original["state"]["costs"]["continuation"]
+
+    extend_study(protocol, source, output, "c_alternating", 0, 1e-9, train_only=True)
+    continued = torch.load(child_checkpoint, weights_only=False)
+    assert continued["state"]["continuation_iteration"] == original["state"]["continuation_iteration"] + 1
+    for side in ("generator", "selector"):
+        before = max(float(state["step"]) for state in original[side]["optimizer"]["state"].values())
+        after = max(float(state["step"]) for state in continued[side]["optimizer"]["state"].values())
+        assert after > before
+    progress = json.loads((child_checkpoint.parent / "progress.json").read_text())
+    assert np.isfinite(progress["latest_metrics"]["mean_ic"])
+    continued_hash = actual_hash(child_checkpoint)
+    extend_study(protocol, source, output, "c_alternating", 0, 1e-9, train_only=True)
+    assert actual_hash(child_checkpoint) == continued_hash
+    with pytest.raises(FileExistsError, match="request differs"):
+        extend_study(protocol, source, output, "c_alternating", 0, 2e-9, train_only=True)
+    result = run_study(child_protocol, output / "results", [0], nodes=["c_alternating"])
+    assert result["development_reports"] > 0
+    assert actual_hash(child_checkpoint) == continued_hash
+    second = tmp_path / "round_2"
+    extend_study(child_protocol, output / "results", second, "c_alternating", 0, 1e-9, train_only=True)
+    twice = torch.load(second / "results/seed_0/nodes/c_alternating/checkpoint.pt", weights_only=False)
+    assert twice["state"]["continuation_iteration"] == continued["state"]["continuation_iteration"] + 1
+    assert actual_hash(checkpoint) == original_hash
+    assert actual_hash(child_checkpoint) == continued_hash
+
+
+@pytest.mark.parametrize("changed", ["reward", "data"])
+def test_extend_rejects_changed_inputs(protocol, tmp_path, changed):
+    """模型接续不允许悄悄换奖励或数据，校验失败不发布新一轮结果。"""
+    from single_factor.hierarchical.comparison_resume import extend_study
+
+    source = tmp_path / "source_results"
+    run_study(protocol, source, [0], nodes=["c_alternating"], train_only=True)
+    path = protocol.with_name("config.json")
+    config = json.loads(path.read_text())
+    if changed == "reward":
+        config["reward"]["alpha"] = json.loads(protocol.read_text())["config"]["reward"]["alpha"] + 1
+        save_json(path, config)
+    else:
+        data = Path(config["tasks"][0]["fit"]["cache"]) / "close.npy"
+        values = np.load(data).copy()
+        values[0, 0] += 1
+        np.save(data, values)
+    output = tmp_path / "rejected_round"
+    with pytest.raises(ValueError, match="source data or training configuration changed"):
+        extend_study(protocol, source, output, "c_alternating", 0, 1e-9, train_only=True)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("hours", [0, -1, float("nan"), float("inf"), True])
+def test_extend_rejects_invalid_hours(tmp_path, hours):
+    """拒绝非法追加时长，避免无限预算或无效目录。"""
+    from single_factor.hierarchical.comparison_resume import extend_study
+
+    with pytest.raises(ValueError, match="hours must be finite and positive"):
+        extend_study(tmp_path / "protocol.json", tmp_path / "source", tmp_path / "output",
+                     "c_alternating", 0, hours, train_only=True)
+    assert not (tmp_path / "output").exists()
+
+
 @pytest.mark.parametrize("width", [0, -1, 1.5, True])
 def test_prepare_protocol_rejects_invalid_width(tmp_path, width):
     """非法宽度在生成配置和协议前失败，避免发布不可训练的实验目录。"""

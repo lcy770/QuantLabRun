@@ -176,6 +176,24 @@ python -m single_factor.hierarchical.comparison_cli run --protocol var/experimen
 
 当前不建议省略 `--nodes` 启动全部实验组，完整实验保留为后续选项。中断后重复同一条训练命令恢复，不能直接修改已冻结协议来增加预算。
 
+### 到达预算后继续训练
+
+时间预算只是本轮检查点，可以在查看效果后继续追加。`extend` 继承模型权重、优化器及其动量、随机状态、候选池、历史记录和累计训练轮数；旧轮数上限不会截断新增时间。追加时间作用于所选节点的最后训练阶段：`g_diffusion` 为下层，`s_upper_ppo` 为上层，`c_alternating` 为两层交替。训练指标仍持续计算，节点 `progress.json` 的 `latest_metrics` 给出最近一次更新指标，上层更新含 `mean_return` 和 `mean_ic`。
+
+下面从主算法上次检查点再追加24小时，结果放在新轮次目录，原模型和评价不覆盖：
+
+```powershell
+python -m single_factor.hierarchical.comparison_cli extend --protocol var/experiments/primary_w256/protocol/protocol.json --source var/experiments/primary_w256/results --output var/experiments/primary_w256/round_1 --node c_alternating --seed 0 --hours 24 --train-only
+```
+
+本轮中断后重复同一条 `extend` 命令，会继续同一预算，不会再次加24小时。下一次还想追加，则以上轮输出为来源并使用新的目录：
+
+```powershell
+python -m single_factor.hierarchical.comparison_cli extend --protocol var/experiments/primary_w256/round_1/protocol/protocol.json --source var/experiments/primary_w256/round_1/results --output var/experiments/primary_w256/round_2 --node c_alternating --seed 0 --hours 24 --train-only
+```
+
+去掉 `--train-only` 可在训练结束后完整评价；也可单独用本轮协议和results目录执行 `run --nodes c_alternating --seeds 0`。评价使用本轮模型重新计算，父轮结果不混入。每一轮保留来源协议、检查点SHA256、代码版本指纹与累计耗时。只复制必要的学习状态，不重训已经完成的依赖。支持从旧版比较实验检查点显式接续：先核验数据、奖励、网络配置和算法节点定义保持一致，建立带来源记录的新协议，随后按当前源码严格恢复；不会把旧协议冒充为当前协议。网络宽度或数据改变不属于时间续训。原起点调度旧双层的独立Campaign暂不通过此入口延长。
+
 ## 主要对比组长训练（后续可选）
 
 根据训练期配对对比确定主要组后，在新的 long 协议执行所选节点。下面命令覆盖生成主对照、新双 PPO 与旧双 PPO，自动补齐共享预训练及依赖。

@@ -345,7 +345,8 @@ class NodeRunner:
             "numpy_rng": np.random.get_state(), "torch_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []})
         save_json(self.root / "progress.json", {**self.state, "history": None, "identity": self.identity,
-                                               "model_metadata": self.model_metadata})
+                                               "model_metadata": self.model_metadata,
+                                               "latest_metrics": self.state["history"][-1] if self.state["history"] else None})
         save_json(self.root / "training_history.json", self.state["history"])
 
     def evaluator(self, task):
@@ -398,16 +399,19 @@ class NodeRunner:
         """同一冻结池采集完整组合回报，然后更新实际 PPO、LinUCB 或 Double DQN。"""
         frozen = self.pools[task["name"]]
         rollouts = []
+        scores = []
         for episode in range(self.config["upper"]["episodes_per_batch"]):
             seed_all(seed_number(self.seed, tag, episode))
             rows, selected, score, contributions = select_members(self.selector, frozen["observation"], self.evaluator(task),
                 frozen["candidates"], method=self.method, trace_lambda=self.config["upper"]["gae_lambda"])
             rollouts.append(rows)
+            scores.append(score)
         metrics = self.selector.learn(rollouts, random.Random(seed_number(self.seed, tag, "update")))
         self.state["selector_version"] += 1
         self.state["history"].append({"stage": "upper", "tag": tag, "task": task["name"],
             "pool_id": frozen["observation"].pool_id, "generator_version": frozen["generator_version"],
-            "mean_return": float(np.mean([rows[0]["return"] for rows in rollouts])), **metrics})
+            "mean_return": float(np.mean([rows[0]["return"] for rows in rollouts])),
+            "mean_ic": float(np.mean([score["ic"] for score in scores])), **metrics})
         if self.config["record_rollouts"] and self.state["selector_version"] % self.study.profile.get("rollout_every", 10) == 0:
             save_torch(self.root / "rollouts" / f"{tag}.pt", {"rows": rollouts, "task": task["name"], "metrics": metrics})
 
