@@ -341,7 +341,8 @@ def test_prepare_cli_resolves_relative_task_caches(tmp_path, monkeypatch, width)
 
 
 @pytest.mark.parametrize("width", [None, 128, 256])
-def test_prepare_protocol_freezes_model_width(protocol, tmp_path, monkeypatch, width):
+@pytest.mark.parametrize("profile", ["smoke", "primary"])
+def test_prepare_protocol_freezes_model_width(protocol, tmp_path, monkeypatch, width, profile):
     """真实准备并加载协议，确认上下层使用覆盖宽度而自回归对照保持原规模。"""
     from single_factor.hierarchical import comparison_study
     from single_factor.hierarchical.comparison_generators import create_generator
@@ -354,19 +355,23 @@ def test_prepare_protocol_freezes_model_width(protocol, tmp_path, monkeypatch, w
     save_json(templates / "profiles.json", profiles)
     monkeypatch.setattr(comparison_study, "TEMPLATES", templates)
     root = tmp_path / "prepared"
-    result = comparison_study.prepare_protocol(tmp_path, root, profile="smoke", device="cpu",
+    result = comparison_study.prepare_protocol(tmp_path, root, profile=profile, device="cpu",
                                                tasks=config["tasks"], width=width)
-    expected = profiles["smoke"]["width"] if width is None else width
+    expected = profiles[profile]["width"] if width is None else width
     assert result["settings"]["width"] == result["config"]["width"] == expected
     assert result["config"]["study_profile"]["width"] == expected
-    assert result["config"]["autoregressive"]["width"] == profiles["smoke"]["rpn_width"]
+    assert result["config"]["autoregressive"]["width"] == profiles[profile]["rpn_width"]
+    if profile == "primary":
+        assert result["settings"]["lower_seconds"] == 48 * 3600
+        assert result["settings"]["upper_seconds"] == 24 * 3600
+        assert result["settings"]["continuation_seconds"] == 48 * 3600
     study = Study(root / "protocol.json", tmp_path / "prepared_results")
     generator = create_generator("diffusion_ppo", study.grammar, study.config)
     selector = create_selector("upper_ppo", study.grammar, study.config)
     assert generator.policy.starter.width == generator.policy.editor.width == expected
     assert selector.policy.actor.encoder.width == selector.policy.critic.encoder.width == expected
     assert json.loads((templates / "profiles.json").read_text()) == profiles
-    if width is not None:
+    if width is not None and profile == "smoke":
         run_study(root / "protocol.json", study.output, [0], nodes=["p_new_dual"])
         assert study.saved_node("g_diffusion", 0)["state"]["lower_iteration"] == 1
         saved = study.saved_node("s_upper_ppo", 0)
@@ -384,6 +389,37 @@ def test_prepare_protocol_freezes_model_width(protocol, tmp_path, monkeypatch, w
         assert json.loads((node_root / "progress.json").read_text())["model_metadata"] == metadata
         # 重复运行同时核验大模型检查点及其优化器状态可被完整加载。
         run_study(root / "protocol.json", study.output, [0], nodes=["p_new_dual"])
+
+
+def test_train_only_then_evaluate_reuses_models(protocol, tmp_path, monkeypatch):
+    """主算法先完成各阶段训练，之后同协议评价且不重复优化或改写检查点。"""
+    import sys
+    from single_factor.hierarchical import comparison_cli
+    from single_factor.hierarchical.selection_config import file_hash
+
+    output = tmp_path / "primary_results"
+    with monkeypatch.context() as guard:
+        evaluate = Mock(side_effect=AssertionError("训练阶段不应执行完整评价"))
+        guard.setattr(Study, "evaluate_node", evaluate)
+        guard.setattr(sys, "argv", ["comparison_cli", "run", "--protocol", str(protocol),
+            "--output", str(output), "--seeds", "0", "--nodes", "c_alternating", "--train-only"])
+        comparison_cli.main()
+        evaluate.assert_not_called()
+    study = Study(protocol, output)
+    assert not list(output.glob("seed_*/nodes/*/development/*.json"))
+    assert not (output / "comparison.csv").exists()
+    assert json.loads((output / "manifest.json").read_text())["evaluation_deferred"] is True
+    progress = json.loads((output / "progress.json").read_text())
+    assert progress["phase"] == "complete" and progress["evaluation_deferred"] is True
+    assert progress["completed_nodes"] == ["syntax", "g_diffusion", "s_upper_ppo", "c_alternating"]
+    assert study.saved_node("g_diffusion", 0)["state"]["lower_iteration"] == 1
+    assert study.saved_node("s_upper_ppo", 0)["state"]["upper_iteration"] == 1
+    assert study.saved_node("c_alternating", 0)["state"]["continuation_iteration"] == 1
+    hashes = {path: file_hash(path) for path in output.glob("seed_*/nodes/*/checkpoint.pt")}
+    result = run_study(protocol, output, [0], nodes=["c_alternating"])
+    assert result["development_reports"] > 0
+    assert json.loads((output / "manifest.json").read_text())["evaluation_deferred"] is False
+    assert {path: file_hash(path) for path in hashes} == hashes
 
 
 @pytest.mark.parametrize("width", [0, -1, 1.5, True])

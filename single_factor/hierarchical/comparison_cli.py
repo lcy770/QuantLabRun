@@ -49,8 +49,8 @@ def copy_source_snapshot(output):
         shutil.copy2(source, destination)
 
 
-def run_study(protocol, output, seeds, nodes=None, groups=None):
-    """按依赖顺序执行完整真实实验，恢复时跳过已提交模型与评价。"""
+def run_study(protocol, output, seeds, nodes=None, groups=None, *, train_only=False):
+    """按依赖训练，可延后完整评价，重复运行时复用已提交模型与结果。"""
     if len(set(seeds)) != len(seeds) or any(seed < 0 for seed in seeds):
         raise ValueError("distinct nonnegative paired seeds are required")
     study = Study(protocol, output)
@@ -69,23 +69,27 @@ def run_study(protocol, output, seeds, nodes=None, groups=None):
         manifest["comparison_split"] = study.comparison_split
         manifest["width"] = study.config["width"]
         manifest["rpn_width"] = study.config.get("autoregressive", {}).get("width", 128)
+        manifest["evaluation_deferred"] = train_only
         save_json(manifest_path, manifest)
         copy_source_snapshot(study.output)
         for seed in seeds:
             for name in ordered:
                 started = perf_counter()
-                save_json(study.output / "progress.json", {"phase": "running", "training_seed": seed, "node": name})
+                save_json(study.output / "progress.json", {"phase": "running", "training_seed": seed, "node": name,
+                                                           "evaluation_deferred": train_only})
                 try:
                     study.run_node(name, seed)
-                    if not study.definitions[name].get("alias"):
+                    if not train_only and not study.definitions[name].get("alias"):
                         study.evaluate_node(name, seed)
                 except BaseException as error:
                     save_json(study.output / "progress.json", {"phase": "failed", "training_seed": seed,
-                        "node": name, "error_type": type(error).__name__, "error": str(error)})
+                        "node": name, "error_type": type(error).__name__, "error": str(error),
+                        "evaluation_deferred": train_only})
                     raise
                 append_json(study.output / "execution.jsonl", {"training_seed": seed, "node": name,
                             "wall_seconds": perf_counter() - started, "status": "complete"})
-        summary = summarize_study(study.output)
+        summary = ({"evaluation_deferred": True, "trained_nodes": ordered, "training_seeds": seeds}
+                   if train_only else summarize_study(study.output))
         save_json(study.output / "progress.json", {"phase": "complete", "completed_nodes": ordered,
                   "training_seeds": seeds, **summary})
         return summary
@@ -199,7 +203,7 @@ def main():
     prepare = commands.add_parser("prepare")
     prepare.add_argument("--cache", required=True)
     prepare.add_argument("--output", required=True)
-    prepare.add_argument("--profile", choices=("smoke", "short", "long"), default="short")
+    prepare.add_argument("--profile", choices=("smoke", "short", "long", "primary"), default="short")
     prepare.add_argument("--device", default="auto")
     prepare.add_argument("--width", type=int, help="覆盖上下层网络隐藏宽度；原生RPN PPO仍使用独立的rpn_width")
     prepare.add_argument("--tasks-config", help="explicit historical/test tasks for local smoke validation")
@@ -225,6 +229,7 @@ def main():
             sub.add_argument("--nodes", nargs="+", required=command == "freeze")
         if command == "run":
             sub.add_argument("--groups", nargs="+")
+            sub.add_argument("--train-only", action="store_true", help="先完成模型训练，延后完整搜索评价；训练奖励照常计算")
         else:
             sub.add_argument("--selection", required=True)
     for command in ("status", "summarize"):
@@ -276,7 +281,7 @@ def main():
         result = {"protocol": str(Path(args.output).resolve() / "protocol.json"), "width": result["config"]["width"],
                   "dates": result["dates"]}
     elif args.command == "run":
-        result = run_study(args.protocol, args.output, args.seeds, args.nodes, args.groups)
+        result = run_study(args.protocol, args.output, args.seeds, args.nodes, args.groups, train_only=args.train_only)
     elif args.command == "freeze":
         result = freeze_selection(args.protocol, args.output, args.nodes, args.seeds, args.selection)
     elif args.command == "evaluate":

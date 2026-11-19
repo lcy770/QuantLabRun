@@ -147,6 +147,7 @@ python -m single_factor.hierarchical.comparison_cli summarize --output var/exper
 | smoke | 24 公式，1 轮 | 每阶段最多 1 次更新 | 4 次尝试与 1 秒，搜索种子 0 |
 | short | 144 公式，2 轮 | 120 秒 / 60 秒 / 120 秒 | 1000 次尝试与 60 秒，搜索种子 0、1、2 |
 | long | 144 公式，10 轮 | 16 小时 / 8 小时 / 4 小时 | 10000 次尝试与 1800 秒，搜索种子 0、1、2 |
+| primary | 144 公式，10 轮 | 48 小时 / 24 小时 / 48 小时 | 与long相同，训练期间可延后完整评价 |
 
 尝试预算与墙钟预算分别运行并分别汇总。失败、重复与未准入的完整提案计入尝试次数。墙钟到期后完成的提案剔除。训练在完整优化批次结束处检查预算，实际耗时可能超过预算一个更新批次。预训练、候选预处理、生成训练、选择训练、续训和在线搜索分别记录。
 
@@ -154,7 +155,28 @@ python -m single_factor.hierarchical.comparison_cli summarize --output var/exper
 
 随机编辑、普通筛选器使用相同配对数据和随机种子重复评价。各学习组有 3 个独立训练种子，每个训练种子内有 3 个搜索重复。统计先在训练种子内平均搜索重复，再计算配对差及 bootstrap 区间。只有 3 个训练种子的区间用于描述重复实验差异。
 
-## 主要对比组长训练
+## 当前优先安排：先训练主算法，再对比
+
+首轮只运行主算法的种子0。新增 `primary` 配置：下层48小时，上层24小时，再交替训练48小时，合计120小时训练预算。预训练、候选池准备、检查点保存及之后的完整评价另计；预算在完整更新结束后检查，因此不是精确的五天完工时间。该预算是首轮上限，是否延长应结合学习曲线和组合表现判断。
+
+```powershell
+python -m single_factor.hierarchical.comparison_cli prepare --cache var/experiments/data_2025h2_2026 --output var/experiments/primary_w256/protocol --profile primary --device cuda --width 256
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/primary_w256/protocol/protocol.json --output var/experiments/primary_w256/results --seeds 0 --nodes c_alternating --train-only
+```
+
+依赖顺序只有 `syntax → g_diffusion → s_upper_ppo → c_alternating`，不会先训练原生RPN等对照。`--train-only` 只延后各节点训练完成后的完整搜索评价，训练所需的因子指标、准入、上层奖励和交替更新照常执行。进度中的 `phase=complete` 且 `evaluation_deferred=true` 表示本轮训练完成，评价尚未执行。
+
+训练结束后，在相同协议与结果目录去掉 `--train-only` 即可补做评价；已保存模型会加载并跳过训练，不重新花费120小时。
+
+```powershell
+python -m single_factor.hierarchical.comparison_cli run --protocol var/experiments/primary_w256/protocol/protocol.json --output var/experiments/primary_w256/results --seeds 0 --nodes c_alternating
+```
+
+确认主算法有学习效果后，再增加少数核心对照和消融，最终补齐种子1、2。基础双层与RPN加上层PPO比较使用各自基础阶段检查点；交替续训与只续下层、只续上层比较使用相同起点和相同追加预算。额外调优的主模型不能直接以更高训练预算与少训的基线作公平优劣结论。所有方法继续共用同一2025—2026年行情和任务口径，报告仍标记为训练期对比。
+
+当前不建议省略 `--nodes` 启动全部实验组，完整实验保留为后续选项。中断后重复同一条训练命令恢复，不能直接修改已冻结协议来增加预算。
+
+## 主要对比组长训练（后续可选）
 
 根据训练期配对对比确定主要组后，在新的 long 协议执行所选节点。下面命令覆盖生成主对照、新双 PPO 与旧双 PPO，自动补齐共享预训练及依赖。
 

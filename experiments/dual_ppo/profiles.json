@@ -51,6 +51,33 @@
       2
     ]
   },
+  "primary": {
+    "width": 128,
+    "noise_steps": 4,
+    "corpus_count": 144,
+    "pretrain_epochs": 10,
+    "lower_iterations": 1000000,
+    "upper_iterations": 1000000,
+    "continuation_iterations": 1000000,
+    "lower_seconds": 172800,
+    "upper_seconds": 86400,
+    "continuation_seconds": 172800,
+    "batch_formulas": 16,
+    "pool_attempts": 128,
+    "episodes_per_batch": 4,
+    "max_members": 10,
+    "candidate_capacity": 128,
+    "ppo_epochs": 4,
+    "rpn_steps": 128,
+    "rpn_width": 128,
+    "attempt_budget": 10000,
+    "time_budget": 1800.0,
+    "evaluation_seeds": [
+      0,
+      1,
+      2
+    ]
+  },
   "long": {
     "width": 32,
     "noise_steps": 4,
