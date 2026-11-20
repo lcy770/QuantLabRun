@@ -198,7 +198,7 @@ python -m single_factor.hierarchical.comparison_cli extend --protocol var/experi
 
 ### GPU旧概率重放检查
 
-采样按单次状态计算，训练重放共享整批公式编码，CUDA 在不同批次形状下可能产生数值差异。误差超过 `2e-5` 的行按原采样布局复核。批量偏差超过 `min(2e-4, clip×0.001)` 时，PPO 逐条核验整个训练批次，并按原采样布局计算本次更新的概率、价值与熵。旧策略概率保持录制值。非有限值或逐条重放偏差超过 `2e-5` 仍在优化前报错。训练指标 `old_logp_sampling_layout_update` 记录本次是否切换布局，另外保存重放误差和逐条核验次数。
+采样按单次状态计算，训练重放共享整批公式编码，CUDA 在不同批次形状下可能产生数值差异。误差超过 `2e-5` 的行按原采样布局复核。批量偏差超过 `min(0.002, clip×0.01)` 时，PPO 逐条核验整个训练批次，并按原采样布局计算本次更新的概率、价值与熵。默认 `clip=0.2` 对应的切换阈值为 `0.002`。旧策略概率保持录制值。非有限值或逐条重放偏差超过 `2e-5` 仍在优化前报错。训练指标 `old_logp_sampling_layout_update` 记录本次是否切换布局，另外保存重放误差和逐条核验次数。
 
 在训练机用训练环境执行 `python -m pytest single_factor/tests/test_ppo_replay.py -q -rs`。其中 CUDA 用例检查完整文法、宽度256、下层带 STOP 和上层512候选，并执行多轮 PPO 更新。新版概率重放也分小批执行，所有旧概率均通过复核后才优化。CUDA 用例跳过时需检查训练解释器。实际行情短验收需使用新面板和 `--profile smoke --device cuda --width 256`。
 

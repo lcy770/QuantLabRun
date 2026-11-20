@@ -77,7 +77,7 @@ def test_sampling_layout_fallback_checks_every_old_probability_before_optimizati
     model = LayoutPolicy()
     rows = rollout(model)
     monkeypatch.setattr(model, "replay_row", model.row, raising=False)
-    drift = (0.0002454519271850586, 3e-5)
+    drift = (0.0021, 3e-5)
     batched = model.rows
 
     def drifted(batch):
@@ -127,8 +127,10 @@ def tiny_grammar():
 
 
 @pytest.mark.parametrize("kind", ["editor", "generator", "selector"])
-@pytest.mark.parametrize("drift", [5e-5, 0.0002454519271850586])
-def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, monkeypatch):
+@pytest.mark.parametrize(("drift", "sampling_layout_update"), [
+    (5e-5, False), (0.0002454519271850586, False), (0.0019, False), (0.0021, True)
+])
+def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, sampling_layout_update, monkeypatch):
     """用真实三种策略核验共享采样路径，复核不消耗额外随机数。"""
     torch.manual_seed(19)
     grammar = tiny_grammar()
@@ -154,8 +156,8 @@ def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, mon
     batched = model.rows
 
     def drifted(batch):
-        """模拟 GPU 合并批次的两种漂移量级。"""
-        if drift > 2e-4:
+        """模拟 GPU 合并批次的数值偏差。"""
+        if sampling_layout_update:
             assert not torch.is_grad_enabled()
         return [(probability + drift, value, entropy) for probability, value, entropy in batched(batch)]
 
@@ -164,7 +166,7 @@ def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, mon
     metrics = update(model, torch.optim.Adam(model.parameters(), lr=.0003), rows, epochs=1, batch_size=16)
     assert metrics["old_logp_scalar_checks"] == len(rows)
     assert metrics["old_logp_max_error"] < 2e-5
-    assert metrics["old_logp_sampling_layout_update"] is (drift > 2e-4)
+    assert metrics["old_logp_sampling_layout_update"] is sampling_layout_update
     assert metrics["optimizer_steps"] > 0
     assert [row["logp"] for row in rows] == old
 
