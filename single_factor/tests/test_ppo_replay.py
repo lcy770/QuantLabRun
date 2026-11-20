@@ -77,7 +77,7 @@ def test_sampling_layout_fallback_checks_every_old_probability_before_optimizati
     model = LayoutPolicy()
     rows = rollout(model)
     monkeypatch.setattr(model, "replay_row", model.row, raising=False)
-    drift = (0.0021, 3e-5)
+    drift = (0.00061, 3e-5)
     batched = model.rows
 
     def drifted(batch):
@@ -128,7 +128,7 @@ def tiny_grammar():
 
 @pytest.mark.parametrize("kind", ["editor", "generator", "selector"])
 @pytest.mark.parametrize(("drift", "sampling_layout_update"), [
-    (5e-5, False), (0.0002454519271850586, False), (0.0019, False), (0.0021, True)
+    (5e-5, False), (0.0002454519271850586, False), (0.00059, False), (0.00061, True)
 ])
 def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, sampling_layout_update, monkeypatch):
     """用真实三种策略核验共享采样路径，复核不消耗额外随机数。"""
@@ -154,11 +154,12 @@ def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, sam
     for index, row in enumerate(rows):
         row["return"] = float(index)
     batched = model.rows
+    batch_update_calls = []
 
     def drifted(batch):
         """模拟 GPU 合并批次的数值偏差。"""
-        if sampling_layout_update:
-            assert not torch.is_grad_enabled()
+        if torch.is_grad_enabled():
+            batch_update_calls.append(len(batch))
         return [(probability + drift, value, entropy) for probability, value, entropy in batched(batch)]
 
     monkeypatch.setattr(model, "rows", drifted)
@@ -167,6 +168,7 @@ def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, sam
     assert metrics["old_logp_scalar_checks"] == len(rows)
     assert metrics["old_logp_max_error"] < 2e-5
     assert metrics["old_logp_sampling_layout_update"] is sampling_layout_update
+    assert bool(batch_update_calls) is not sampling_layout_update
     assert metrics["optimizer_steps"] > 0
     assert [row["logp"] for row in rows] == old
 

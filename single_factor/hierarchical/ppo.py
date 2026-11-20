@@ -130,7 +130,7 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
             raise AssertionError("old-policy action probability replay contains non-finite values")
         differences = np.abs(observed - stored)
         batch_error = float(differences.max())
-        batch_mismatch = batch_error > min(2e-3, clip * 1e-2)
+        batch_mismatch = batch_error > min(6e-4, clip * 3e-3)
         replay_row = getattr(model, "replay_row", None)
         exact_update = batch_mismatch and replay_row is not None
         fallback = range(len(rows)) if exact_update else np.flatnonzero(differences > 2e-5)
