@@ -130,11 +130,16 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
             raise AssertionError("old-policy action probability replay contains non-finite values")
         differences = np.abs(observed - stored)
         batch_error = float(differences.max())
-        fallback = np.flatnonzero(differences > 2e-5)
+        batch_mismatch = batch_error > min(2e-4, clip * 1e-3)
+        replay_row = getattr(model, "replay_row", None)
+        exact_update = batch_mismatch and replay_row is not None
+        fallback = range(len(rows)) if exact_update else np.flatnonzero(differences > 2e-5)
         # CUDA批次形状可改变数值归约；超差时按实际采样路径复核，原阈值保持不变。
         for index in fallback:
             row = rows[index]
-            if hasattr(model, "replay_logp"):
+            if exact_update:
+                actual = replay_row(row)[0]
+            elif hasattr(model, "replay_logp"):
                 actual = model.replay_logp(row)
             elif hasattr(model, "row"):
                 actual = model.row(row)[0]
@@ -145,10 +150,12 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
                 raise AssertionError(f"old-policy action probability replay mismatch: {difference} "
                                      f"(row={index}, batch_error={batch_error})")
             differences[index] = difference
-        # 仅接受很小的批次数值漂移；即使单条复核通过，也不能掩盖批量实现错误。
-        if batch_error > min(2e-4, clip * 1e-3):
+        if batch_mismatch and not exact_update:
             raise AssertionError(f"old-policy batch probability replay mismatch: {batch_error}")
         error = float(differences.max())
+    if exact_update:
+        # 批量结果超差时不用它做梯度更新，整个 PPO 批次沿用已核验的原采样布局。
+        evaluate_rows = lambda batch: [replay_row(row) for row in batch]
     for _ in range(epochs):
         order = list(range(len(rows)))
         rng.shuffle(order)
@@ -186,5 +193,6 @@ def update(model, optimizer, rows, *, epochs=4, batch_size=16, clip=0.2,
     return losses | {
         "old_logp_max_error": error, "samples": len(rows),
         "old_logp_batch_max_error": batch_error, "old_logp_scalar_checks": len(fallback),
+        "old_logp_sampling_layout_update": exact_update,
         "advantage_std_before_normalization": raw_std, "value_explained_variance": explained,
         "kl_early_stop": stopped, "optimizer_steps": len(history)}

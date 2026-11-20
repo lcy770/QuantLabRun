@@ -73,6 +73,26 @@ def test_real_or_large_replay_mismatches_fail_before_optimization(failure):
     assert not optimizer.state
 
 
+def test_sampling_layout_fallback_checks_every_old_probability_before_optimization(monkeypatch):
+    model = LayoutPolicy()
+    rows = rollout(model)
+    monkeypatch.setattr(model, "replay_row", model.row, raising=False)
+    drift = (0.0002454519271850586, 3e-5)
+    batched = model.rows
+
+    def drifted(batch):
+        return [(logp + offset, value, entropy)
+                for (logp, value, entropy), offset in zip(batched(batch), drift, strict=True)]
+
+    monkeypatch.setattr(model, "rows", drifted)
+    # The second row agrees with the batched evaluator but disagrees with sampling.
+    rows[1]["logp"] += drift[1]
+    optimizer = torch.optim.Adam(model.parameters(), lr=.01)
+    with pytest.raises(AssertionError, match=r"old-policy action probability.*row=1"):
+        update(model, optimizer, rows, epochs=1, batch_size=2)
+    assert not optimizer.state
+
+
 @pytest.mark.parametrize("corrupt_tail", [False, True])
 def test_large_rollout_replays_in_minibatches_before_any_update(monkeypatch, corrupt_tail):
     """长轨迹的重放显存受小批限制，末批损坏仍在任何参数更新之前拦截。"""
@@ -107,7 +127,8 @@ def tiny_grammar():
 
 
 @pytest.mark.parametrize("kind", ["editor", "generator", "selector"])
-def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, monkeypatch):
+@pytest.mark.parametrize("drift", [5e-5, 0.0002454519271850586])
+def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, drift, monkeypatch):
     """用真实三种策略核验共享采样路径，复核不消耗额外随机数。"""
     torch.manual_seed(19)
     grammar = tiny_grammar()
@@ -126,19 +147,26 @@ def test_scalar_replay_uses_sampling_path_without_consuming_rng(kind, monkeypatc
     state = torch.get_rng_state().clone()
     with torch.no_grad():
         assert max(abs(float(model.replay_logp(row)) - row["logp"]) for row in rows) < 2e-5
+        assert max(abs(float(model.replay_row(row)[1]) - row["value"]) for row in rows) < 2e-5
     assert torch.equal(state, torch.get_rng_state())
     for index, row in enumerate(rows):
         row["return"] = float(index)
     batched = model.rows
 
     def drifted(batch):
-        """模拟GPU合并批次的微小差异，保持真实单条采样路径不变。"""
-        return [(probability + 5e-5, value, entropy) for probability, value, entropy in batched(batch)]
+        """模拟 GPU 合并批次的两种漂移量级。"""
+        if drift > 2e-4:
+            assert not torch.is_grad_enabled()
+        return [(probability + drift, value, entropy) for probability, value, entropy in batched(batch)]
 
     monkeypatch.setattr(model, "rows", drifted)
+    old = [row["logp"] for row in rows]
     metrics = update(model, torch.optim.Adam(model.parameters(), lr=.0003), rows, epochs=1, batch_size=16)
     assert metrics["old_logp_scalar_checks"] == len(rows)
     assert metrics["old_logp_max_error"] < 2e-5
+    assert metrics["old_logp_sampling_layout_update"] is (drift > 2e-4)
+    assert metrics["optimizer_steps"] > 0
+    assert [row["logp"] for row in rows] == old
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="需要CUDA设备")

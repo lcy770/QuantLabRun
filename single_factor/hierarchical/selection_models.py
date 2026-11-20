@@ -44,6 +44,14 @@ class GeneratorPolicy(nn.Module):
             return self.editor.replay_logp(row)
         raise ValueError("unknown lower action kind")
 
+    def replay_row(self, row):
+        """分别使用起点与编辑动作的原采样布局做可微重放。"""
+        if row["kind"] == "start":
+            return self.starter.replay_row(row)
+        if row["kind"] == "edit":
+            return self.editor.replay_row(row)
+        raise ValueError("unknown lower action kind")
+
     @torch.no_grad()
     def generate(self, observation, rng, steps, perturbation_steps, record=True):
         """采样起点或 NEW，经固定正向扰动与原生 RPN 反向编辑生成终点。"""
@@ -181,7 +189,12 @@ class SelectorPolicy(nn.Module):
             result.append((distribution.logits[row["index"]], value, distribution.entropy()))
         return result
 
+    def replay_row(self, row):
+        """按单次选成员的原采样布局重算概率、价值和熵。"""
+        distribution, value = self.distribution(row["observation"])
+        return distribution.logits[row["index"]], value, distribution.entropy()
+
     def replay_logp(self, row):
-        """按单次选成员的原采样批次复核概率，包含相同已选成员掩码。"""
+        """按单次选成员的原采样布局复核概率，保持已选成员掩码。"""
         distribution, _ = self.distribution(row["observation"])
         return distribution.logits[row["index"]]

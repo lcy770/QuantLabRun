@@ -451,8 +451,8 @@ class LowerPolicy(nn.Module):
         ordered = tuple(action for path in paths for action in grouped[path]) if legal_actions is not None else None
         return paths, Categorical(logits=position_logits), replacements_at, ordered
 
-    def replay_logp(self, row):
-        """不抽样、不改旧概率，按录制时的批次布局复核指定动作的联合概率。"""
+    def _replay_action(self, row):
+        """按录制时的批次布局重建位置及条件替换分布。"""
         tree = self.edit_kernel.from_node(row["tree"])
         actions = tuple(self.edit_kernel.native_edit(tree, edit)
                         for edit in (row.get("legal_actions") or self.edit_kernel.edits(tree)))
@@ -461,11 +461,35 @@ class LowerPolicy(nn.Module):
         if row["action"] is None:
             if self.stop_head is None:
                 raise ValueError("STOP requires a learned lower stop action")
-            return positions.logits[-1]
-        action = self.edit_kernel.native_edit(tree, row["action"])
-        index = paths.index(action.path)
-        choices, edits = replacements_at(index)
-        return positions.logits[index] + edits.logits[choices.index(action)]
+            logp = positions.logits[-1]
+        else:
+            action = self.edit_kernel.native_edit(tree, row["action"])
+            index = paths.index(action.path)
+            choices, edits = replacements_at(index)
+            logp = positions.logits[index] + edits.logits[choices.index(action)]
+        return tree, logp, positions, replacements_at, len(paths)
+
+    def replay_logp(self, row):
+        """不消耗随机数，只复核所选动作的联合概率。"""
+        return self._replay_action(row)[1]
+
+    def replay_row(self, row):
+        """用原采样布局求可微的概率、价值和联合熵。"""
+        tree, logp, positions, replacements_at, count = self._replay_action(row)
+        entropy = positions.entropy()
+        for index in range(count):
+            _, edits = replacements_at(index)
+            entropy = entropy + positions.probs[index] * edits.entropy()
+        bias = self.task_embedding(row.get("task"), self.critic_encoder, self.critic_task) if self.use_task else None
+        return logp, self._sampling_value(tree, row["step"], bias), entropy
+
+    def _sampling_value(self, tree, step, bias):
+        """按采样布局独立编码当前公式和任务条件。"""
+        critic = self.critic_encoder.encode([], roots=[tree])[tree]
+        time = self.critic_time.weight[step]
+        if bias is not None:
+            time = time + bias
+        return self.value_head(torch.cat((critic, time))).squeeze()
 
     @torch.no_grad()
     def sample(self, tree, remaining=None, record=True, task=None, *, time_edits=False, allow_stop=True):
@@ -506,11 +530,7 @@ class LowerPolicy(nn.Module):
                 action, logp = choices[j], logp + edits.logits[j]
             if record:
                 # 保存旧策略概率、价值和动作前状态，PPO 更新时按原条件重放。
-                critic = self.critic_encoder.encode([], roots=[tree])[tree]
-                critic_time = self.critic_time.weight[step]
-                if self.use_task:
-                    critic_time = critic_time + critic_bias
-                value = self.value_head(torch.cat((critic, critic_time))).squeeze()
+                value = self._sampling_value(tree, step, critic_bias)
                 row = {"tree": tree, "step": step, "action": action,
                        "logp": float(logp), "value": float(value),
                        "legal_actions": ordered}
@@ -684,6 +704,8 @@ class UpperPolicy(nn.Module):
         """按保存的观测和起点索引重算单条上层动作的对数概率、价值及熵。"""
         distribution, value = self.distribution(row["observation"])
         return distribution.logits[row["index"]], value, distribution.entropy()
+
+    replay_row = row
 
     def rows(self, rows):
         """共享一批观测中重复公式的编码，逐行返回上层动作对数概率、价值及熵。
